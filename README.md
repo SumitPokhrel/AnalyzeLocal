@@ -21,7 +21,7 @@ analysis and comparison, all on-device.
 
 ## Requirements
 
-- An Apple Silicon Mac (M1 or newer). Intel Macs are not supported.
+- An Apple Silicon Mac (M1 or newer). Intel Macs are not supported. Supporting windows is the next step. 
 - macOS, with about 16GB of memory recommended.
 - Python 3.10 or newer.
 - Node.js, used to build the web interface.
