@@ -1,0 +1,97 @@
+# CLAUDE.md - AnalyzeLocal
+
+Project instructions for Claude Code. Read this before making changes.
+
+## What this project is
+
+AnalyzeLocal is an open-source desktop tool that analyzes sensitive personal
+documents (job offers, leases, tax returns) entirely on the user's machine.
+The whole point is privacy: you never upload your documents to a cloud AI
+service like ChatGPT or Claude. Everything stays on your laptop, and no
+document, and no data derived from a document, ever leaves the computer. It
+detects and redacts PII, then produces a plain-language analysis and
+comparison locally.
+
+## Hard constraints (do not violate)
+
+- On-device only. The shipped application must make zero network calls. No
+  cloud APIs, no telemetry, no analytics, no update pings, no crash reporting
+  that transmits data.
+- All models run locally. Any LLM or NER model is downloaded once and runs
+  offline afterward.
+- Apple Silicon macOS only for the first version. Target M1 and newer. Do not
+  add Windows, Linux, or Intel Mac code paths yet. Structure the code so a
+  Windows port is possible later, but do not build it now.
+- Fits in 16GB RAM. Assume an M1 with 16GB shared memory running alongside the
+  OS and a browser. Model plus app must leave comfortable headroom. Prefer
+  small models (roughly 8B parameters or fewer, quantized) over large ones.
+- Python is the primary language.
+
+## Keep it simple
+
+- Do not add abstractions, config systems, or plugin frameworks until they are
+  actually needed.
+- Prefer a small number of well-understood dependencies.
+- No virtual environment gymnastics. A single requirements.txt is enough. If a
+  venv is used, keep it optional and documented in one line.
+- Favor the standard library and mature packages over exotic ones.
+
+## Pipeline (redact first, then analyze)
+
+Keep the flow simple and the steps light. Redaction should not feel heavy.
+
+1. Extract text from the input document (PDF, docx, plain text).
+2. Redact PII on the extracted text:
+   - Regex and checksums for structured items (SSN, EIN, account numbers,
+     emails, phone numbers, dates).
+   - A local NER model (for example GLiNER) for names, addresses, employers,
+     and other unstructured entities.
+3. Quick review: show the user what was redacted so they can confirm or fix
+   it. Keep this fast and skippable, not a heavy mandatory gate.
+4. Analyze the redacted text with a local LLM (for example comparing two job
+   offers). This step only ever sees redacted content.
+
+Build steps 1, 2, and 4 first. Add the review in step 3 once the core works.
+
+## Model runtime
+
+- Default model: Qwen3 8B, quantized to Q4_K_M, run through Ollama. Chosen for
+  its permissive Apache 2.0 license and good quality at a size that fits 16GB
+  with headroom.
+- Keep the model name in config so a user can swap in another local model (for
+  example Gemma or Phi-4) without code changes.
+- Use a Mac-native local runtime. Ollama is the default for easy setup. MLX is
+  an option later if more speed is wanted.
+- Download model weights on first run. Never bundle anything that phones home.
+
+## Interface
+
+A simple local web dashboard. Not fancy.
+
+- React frontend. The user can upload a PDF, docx, or text file, see the
+  redaction and analysis, and ask follow-up questions about the document in a
+  basic chat box.
+- A local Python backend (for example FastAPI) exposes the pipeline to the
+  frontend. The frontend talks to it over localhost only.
+- Localhost traffic stays on the machine, so this does not break the on-device
+  rule. There are still no calls to the internet.
+- Keep the UI minimal: an upload area, a results view for the redacted
+  analysis, and a question box. No accounts, no settings sprawl, no styling
+  beyond clean and readable.
+
+## Coding conventions
+
+- Plain, readable Python.
+- Type hints are mandatory on every function, covering all parameters and the
+  return type.
+- Short, direct docstrings.
+- No decorative symbols, em dashes, or emojis anywhere in the code, comments,
+  or docs. Use plain ASCII and hyphens.
+- Keep functions small and testable.
+
+## For contributors
+
+- MIT licensed. Keep it easy for others to clone, install, and run on their
+  own Mac.
+- Setup should be: clone, install dependencies, download the model, run.
+  Document each step in the README.

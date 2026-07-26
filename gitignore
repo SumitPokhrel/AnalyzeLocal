@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+build/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Node and frontend build output
+node_modules/
+dist/
+.vite/
+npm-debug.log*
+
+# Environment and local config
+.env
+.env.*
+
+# Editor and OS files
+.vscode/
+.idea/
+.DS_Store
+
+# Local model files and caches, if any land inside the repo
+models/
+*.gguf
+.cache/
+
+# User documents and runtime output. Never commit real personal data.
+uploads/
+backend/uploads/
+scratch/
+local_docs/
