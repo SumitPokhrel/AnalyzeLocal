@@ -24,7 +24,9 @@ analysis and comparison, all on-device.
 - An Apple Silicon Mac (M1 or newer). Intel Macs are not supported. Supporting windows is the next step. 
 - macOS, with about 16GB of memory recommended.
 - Python 3.10 or newer.
-- Node.js, used to build the web interface.
+- Node.js, used to build the web interface. TypeScript and the other build
+  tools install with it in the next step, so nothing needs to be set up
+  globally.
 - Ollama, used to run the local model. See https://ollama.com
 
 Windows support is planned for a later version.
@@ -61,6 +63,9 @@ npm run build
 cd ..
 ```
 
+The build type checks the TypeScript first, so a type error stops it before
+anything is bundled.
+
 ## Run
 
 Start the app with a single command from the project root.
@@ -78,8 +83,15 @@ localhost, which is loopback and never touches the internet.
 
 ## Changing the model
 
-The model is set by one value in the config (default: qwen3:8b). To use a
-different local model, change that value to another Ollama tag and pull it.
+The model is set by one value in backend/config.py (default: qwen3:8b). To use
+a different local model, change that value to another Ollama tag and pull it,
+or set the environment variable instead of editing the file.
+
+```
+export ANALYZELOCAL_MODEL=phi4-mini
+ollama pull phi4-mini
+```
+
 Some options that fit a 16GB Mac:
 
 - qwen3:8b (default), Apache 2.0 license
@@ -95,9 +107,26 @@ Ollama uses Q4_K_M quantization by default, which is the right balance on a
 
 The pipeline runs in this order: extract text, redact personal information,
 quick review, then analyze the redacted text. The analysis step only ever sees
-redacted content. The backend is Python and FastAPI. The interface is React. In
-a normal run, FastAPI serves both the built interface and the API on one local
-port.
+redacted content. The backend is Python and FastAPI. The interface is React and
+TypeScript, built with Vite. In a normal run, FastAPI serves both the built
+interface and the API on one local port.
+
+The request and response types in frontend/src/api.ts are written by hand to
+match the Pydantic models in backend/schemas.py. There is no code generation
+step, so if you change a schema, change both files.
+
+The backend talks to the model through the HTTP API that Ollama already
+exposes on 127.0.0.1:11434, using httpx. There is no separate client library
+in between, so the one address the app contacts is visible in plain sight in
+backend/pipeline/model.py.
+
+To work on the interface, run the Vite dev server alongside the backend. It
+serves on port 5173 and proxies API calls to the backend on port 8000.
+
+```
+python backend/app.py
+cd frontend && npm run dev
+```
 
 ## Privacy
 

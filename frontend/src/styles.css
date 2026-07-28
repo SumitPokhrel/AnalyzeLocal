@@ -1,0 +1,80 @@
+body {
+  font-family: system-ui, sans-serif;
+  line-height: 1.5;
+  color: #1a1a1a;
+  background: #ffffff;
+  margin: 0;
+}
+
+main {
+  max-width: 46rem;
+  margin: 0 auto;
+  padding: 2rem 1rem 4rem;
+}
+
+h1 {
+  margin-bottom: 0.25rem;
+}
+
+h2 {
+  margin-top: 2rem;
+  font-size: 1.1rem;
+}
+
+.subtitle,
+.status {
+  color: #555555;
+  font-size: 0.9rem;
+}
+
+.error {
+  color: #a12020;
+}
+
+.asked {
+  font-weight: 600;
+  margin-bottom: 0.25rem;
+}
+
+.output {
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  background: #f6f6f6;
+  border: 1px solid #e0e0e0;
+  border-radius: 4px;
+  padding: 0.75rem;
+  margin-top: 0.5rem;
+}
+
+pre.output {
+  max-height: 24rem;
+  overflow-y: auto;
+  font-size: 0.85rem;
+}
+
+form {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+
+form input {
+  flex: 1;
+  padding: 0.5rem;
+  border: 1px solid #cccccc;
+  border-radius: 4px;
+}
+
+button {
+  padding: 0.5rem 1rem;
+  border: 1px solid #cccccc;
+  border-radius: 4px;
+  background: #f0f0f0;
+  cursor: pointer;
+}
+
+button:disabled,
+input:disabled {
+  opacity: 0.6;
+  cursor: default;
+}

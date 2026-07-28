@@ -68,9 +68,9 @@ Build steps 1, 2, and 4 first. Add the review in step 3 once the core works.
 
 A simple local web dashboard. Not fancy.
 
-- React frontend. The user can upload a PDF, docx, or text file, see the
-  redaction and analysis, and ask follow-up questions about the document in a
-  basic chat box.
+- React frontend written in TypeScript, built with Vite. The user can upload a
+  PDF, docx, or text file, see the redaction and analysis, and ask follow-up
+  questions about the document in a basic chat box.
 - A local Python backend (for example FastAPI) exposes the pipeline to the
   frontend. The frontend talks to it over localhost only.
 - Localhost traffic stays on the machine, so this does not break the on-device
@@ -88,6 +88,17 @@ A simple local web dashboard. Not fancy.
 - No decorative symbols, em dashes, or emojis anywhere in the code, comments,
   or docs. Use plain ASCII and hyphens.
 - Keep functions small and testable.
+
+Frontend:
+
+- TypeScript runs in strict mode. No implicit any, and no use of the any type
+  to get past a type error.
+- The API types in frontend/src/api.ts mirror the Pydantic models in
+  backend/schemas.py by hand. When a schema changes on one side, change it on
+  the other in the same commit.
+- Component props get a named interface rather than an inline type.
+- npm run build type checks before it bundles, so a type error fails the
+  build.
 
 ## For contributors
 

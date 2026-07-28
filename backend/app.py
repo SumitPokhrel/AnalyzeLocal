@@ -1,0 +1,201 @@
+"""FastAPI backend for AnalyzeLocal.
+
+Serves the API and the built frontend on one loopback port. The only network
+traffic is between the browser, this server, and the local Ollama process,
+all on 127.0.0.1.
+
+Run it with: python backend/app.py
+"""
+
+import tempfile
+import uuid
+import webbrowser
+from pathlib import Path
+from threading import Timer
+
+import uvicorn
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+
+import config
+from pipeline import analyze as analysis
+from pipeline import extract, model, redact
+from schemas import (
+    AnalyzeResponse,
+    CompareResponse,
+    HealthResponse,
+    QuestionRequest,
+    QuestionResponse,
+    RedactionResult,
+)
+
+FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
+
+# Redacted documents from this run, keyed by document id. Held in memory only,
+# never written to disk, and dropped when the process exits. This is what the
+# follow-up question route reads from.
+DOCUMENTS: dict[str, str] = {}
+
+# The interactive docs are disabled on purpose. FastAPI loads the Swagger UI
+# assets from a public CDN, which would be an outbound network call.
+app = FastAPI(title="AnalyzeLocal", docs_url=None, redoc_url=None)
+
+# Only needed during development, when the Vite dev server runs on its own
+# port. In a normal run the frontend is served from this same origin.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.exception_handler(NotImplementedError)
+async def handle_not_implemented(
+    request: Request, exc: NotImplementedError
+) -> JSONResponse:
+    """Return a clear 501 while the pipeline is still stubbed out."""
+    detail = str(exc) or "This part of the pipeline is not implemented yet."
+    return JSONResponse(status_code=501, content={"detail": detail})
+
+
+def save_upload(upload: UploadFile) -> Path:
+    """Write an upload to a temporary file and return its path."""
+    suffix = Path(upload.filename or "").suffix.lower()
+    if suffix not in config.SUPPORTED_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type: {suffix or 'unknown'}",
+        )
+
+    handle = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+    path = Path(handle.name)
+    size = 0
+    with handle:
+        while chunk := upload.file.read(1024 * 1024):
+            size += len(chunk)
+            if size > config.MAX_UPLOAD_BYTES:
+                path.unlink(missing_ok=True)
+                raise HTTPException(status_code=413, detail="File is too large.")
+            handle.write(chunk)
+    return path
+
+
+def redact_upload(upload: UploadFile) -> tuple[str, RedactionResult]:
+    """Extract and redact one upload, and remember the redacted text."""
+    path = save_upload(upload)
+    try:
+        text = extract.extract_text(path)
+    finally:
+        path.unlink(missing_ok=True)
+
+    result = redact.redact(text)
+    document_id = uuid.uuid4().hex
+    DOCUMENTS[document_id] = result.redacted_text
+    return document_id, result
+
+
+@app.get("/api/health", response_model=HealthResponse)
+def health() -> HealthResponse:
+    """Report server status and whether the local model runtime is reachable."""
+    return HealthResponse(
+        status="ok",
+        configured_model=config.MODEL_NAME,
+        ollama_available=model.is_available(),
+    )
+
+
+@app.post("/api/analyze", response_model=AnalyzeResponse)
+def analyze_document(file: UploadFile = File(...)) -> AnalyzeResponse:
+    """Extract, redact, and analyze one document."""
+    document_id, result = redact_upload(file)
+    return AnalyzeResponse(
+        document_id=document_id,
+        redacted_text=result.redacted_text,
+        spans=result.spans,
+        analysis=analysis.analyze(result.redacted_text),
+    )
+
+
+@app.post("/api/compare", response_model=CompareResponse)
+def compare_documents(
+    first: UploadFile = File(...), second: UploadFile = File(...)
+) -> CompareResponse:
+    """Extract, redact, and compare two documents side by side."""
+    first_id, first_result = redact_upload(first)
+    second_id, second_result = redact_upload(second)
+    return CompareResponse(
+        document_ids=[first_id, second_id],
+        redacted_texts=[first_result.redacted_text, second_result.redacted_text],
+        spans=[first_result.spans, second_result.spans],
+        comparison=analysis.compare(
+            first_result.redacted_text, second_result.redacted_text
+        ),
+    )
+
+
+@app.post("/api/question", response_model=QuestionResponse)
+def ask_question(request: QuestionRequest) -> QuestionResponse:
+    """Answer a follow-up question about an already redacted document."""
+    redacted_text = DOCUMENTS.get(request.document_id)
+    if redacted_text is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Unknown document id. Upload the document again.",
+        )
+    return QuestionResponse(
+        answer=analysis.answer_question(redacted_text, request.question)
+    )
+
+
+if FRONTEND_DIST.is_dir():
+    assets_dir = FRONTEND_DIST / "assets"
+    if assets_dir.is_dir():
+        app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+
+    @app.get("/{path:path}")
+    def serve_frontend(path: str) -> FileResponse:
+        """Serve the built frontend, falling back to index.html for routes."""
+        if path.startswith("api/"):
+            raise HTTPException(status_code=404, detail="Not found")
+        candidate = FRONTEND_DIST / path
+        if path and candidate.is_file():
+            return FileResponse(candidate)
+        return FileResponse(FRONTEND_DIST / "index.html")
+
+else:
+
+    @app.get("/")
+    def missing_frontend() -> JSONResponse:
+        """Explain how to build the frontend when the build is missing."""
+        return JSONResponse(
+            status_code=503,
+            content={
+                "detail": (
+                    "Frontend build not found. Run 'npm install' and "
+                    "'npm run build' in the frontend directory."
+                )
+            },
+        )
+
+
+def open_browser() -> None:
+    """Open the local dashboard in the default browser."""
+    webbrowser.open(f"http://{config.HOST}:{config.PORT}")
+
+
+def main() -> None:
+    """Start the local server and open the dashboard."""
+    if not FRONTEND_DIST.is_dir():
+        print(
+            "Frontend build not found. Run 'npm install' and 'npm run build' "
+            "in the frontend directory."
+        )
+    Timer(1.0, open_browser).start()
+    uvicorn.run(app, host=config.HOST, port=config.PORT, log_level="info")
+
+
+if __name__ == "__main__":
+    main()
