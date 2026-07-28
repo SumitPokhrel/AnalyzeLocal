@@ -100,6 +100,19 @@ Frontend:
 - npm run build type checks before it bundles, so a type error fails the
   build.
 
+## Tests
+
+- pytest. Run it from the project root with a bare pytest command.
+- Test dependencies live in backend/requirements-dev.txt, kept separate from
+  requirements.txt so running the app does not install test tooling.
+- Test documents are generated in backend/tests/conftest.py rather than
+  committed as binary files, so a contributor can read what is in each one
+  and add a case without needing a Word licence or a scanner.
+- When a bug is fixed, add a test that fails without the fix and say in the
+  docstring what the bug was.
+- Do not assert on the responses of stubbed routes. Those change as the
+  pipeline is filled in, and tests that track them are noise.
+
 ## For contributors
 
 - MIT licensed. Keep it easy for others to clone, install, and run on their

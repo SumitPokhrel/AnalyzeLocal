@@ -19,11 +19,21 @@ backend/                Python, FastAPI
     model.py            Load and run the local model. Default is Qwen3 8B at
                         Q4_K_M through Ollama, with the model name in config
                         so it can be swapped.
-    config.py           Model name, Ollama URL, host and port, upload limits.
+  config.py             Model name, Ollama URL, host and port, upload limits.
                         Every value has an environment variable override.
-    schemas.py          Pydantic request and response models, shared by the
+  schemas.py            Pydantic request and response models, shared by the
                         routes and the pipeline.
+  tests/
+    conftest.py         Builds the test documents at run time. Nothing binary
+                        is committed, so each fixture can be read and changed.
+    test_extract.py     Extraction, including the encoding and document order
+                        cases that have already caused bugs.
+    test_api.py         Route behavior that does not change as the pipeline
+                        is filled in.
   requirements.txt
+  requirements-dev.txt  Test only. Keeps pytest out of the shipped install.
+pytest.ini              Points pytest at backend/tests, with backend on the
+                        import path.
 frontend/               React and TypeScript, built with Vite
   tsconfig.json         Strict mode. Type checking runs before the bundle.
   vite.config.ts        Dev server on 5173, proxying /api to the backend.
@@ -142,7 +152,10 @@ GLiNER, FastAPI, and the browser.
 
 ## Build order
 
-1. Text extraction (extract.py).
-2. Redaction (redact.py): regex and checksums first, then GLiNER.
+1. Text extraction (extract.py). Done, covered by backend/tests.
+2. Redaction (redact.py): regex and checksums first, then GLiNER. Next.
 3. Analysis and question answering (analyze.py) on redacted text.
 4. Wire the frontend to the backend, then add the quick redaction review.
+
+Each step lands with tests. A bug that gets fixed gets a test that fails
+without the fix, so the same mistake cannot come back quietly.

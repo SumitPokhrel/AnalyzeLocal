@@ -81,6 +81,18 @@ review the redactions, and read the analysis.
 All traffic stays on your machine. The browser talks to the local backend over
 localhost, which is loopback and never touches the internet.
 
+## Tests
+
+Install the test dependencies, then run pytest from the project root.
+
+```
+pip install -r backend/requirements-dev.txt
+pytest
+```
+
+The test documents are generated while the tests run, so there are no binary
+fixtures in the repository. Ollama does not need to be running.
+
 ## Changing the model
 
 The model is set by one value in backend/config.py (default: qwen3:8b). To use

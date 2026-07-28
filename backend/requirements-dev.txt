@@ -1,0 +1,8 @@
+# Test only. The app does not need any of this to run, so it is kept out of
+# requirements.txt to keep the installed surface of the shipped tool small.
+
+pytest>=8.3
+
+# Used only to build PDF fixtures with a real text layer. pypdf can read
+# PDFs but cannot write text into them.
+reportlab>=4.2

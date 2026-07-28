@@ -52,6 +52,18 @@ app.add_middleware(
 )
 
 
+@app.exception_handler(extract.ExtractionError)
+async def handle_extraction_error(
+    request: Request, exc: extract.ExtractionError
+) -> JSONResponse:
+    """Show the extractor message to the user instead of a server error.
+
+    A scanned or password protected document is an expected input, not a bug,
+    so it gets a readable reason rather than a 500.
+    """
+    return JSONResponse(status_code=422, content={"detail": str(exc)})
+
+
 @app.exception_handler(NotImplementedError)
 async def handle_not_implemented(
     request: Request, exc: NotImplementedError
