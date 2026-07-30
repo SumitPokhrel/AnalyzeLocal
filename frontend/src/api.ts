@@ -4,15 +4,6 @@
 // The types below mirror the Pydantic models in backend/schemas.py. Keep the
 // two in step: a field renamed there has to be renamed here.
 
-export interface RedactionSpan {
-  start: number;
-  end: number;
-  label: string;
-  placeholder: string;
-  source: string;
-  original: string;
-}
-
 export interface HealthResponse {
   status: string;
   configured_model: string;
@@ -21,16 +12,12 @@ export interface HealthResponse {
 
 export interface AnalyzeResponse {
   document_id: string;
-  redacted_text: string;
-  spans: RedactionSpan[];
   analysis: string;
 }
 
 // The compare route exists on the backend but has no caller in the UI yet.
 export interface CompareResponse {
   document_ids: string[];
-  redacted_texts: string[];
-  spans: RedactionSpan[][];
   comparison: string;
 }
 

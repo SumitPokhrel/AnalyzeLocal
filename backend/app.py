@@ -12,6 +12,7 @@ import uuid
 import webbrowser
 from pathlib import Path
 from threading import Timer
+from typing import NamedTuple
 
 import uvicorn
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
@@ -21,22 +22,32 @@ from fastapi.staticfiles import StaticFiles
 
 import config
 from pipeline import analyze as analysis
-from pipeline import extract, model, redact
+from pipeline import extract, model
 from schemas import (
     AnalyzeResponse,
     CompareResponse,
     HealthResponse,
     QuestionRequest,
     QuestionResponse,
-    RedactionResult,
 )
 
 FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 
-# Redacted documents from this run, keyed by document id. Held in memory only,
+# Extracted documents from this run, keyed by document id. Held in memory only,
 # never written to disk, and dropped when the process exits. This is what the
 # follow-up question route reads from.
 DOCUMENTS: dict[str, str] = {}
+
+
+class ExtractedDocument(NamedTuple):
+    """One upload after extraction.
+
+    Both fields are strings, so they are named rather than returned as a bare
+    tuple. Transposing them would otherwise type check quietly.
+    """
+
+    document_id: str
+    text: str
 
 # The interactive docs are disabled on purpose. FastAPI loads the Swagger UI
 # assets from a public CDN, which would be an outbound network call.
@@ -95,18 +106,17 @@ def save_upload(upload: UploadFile) -> Path:
     return path
 
 
-def redact_upload(upload: UploadFile) -> tuple[str, RedactionResult]:
-    """Extract and redact one upload, and remember the redacted text."""
+def extract_upload(upload: UploadFile) -> ExtractedDocument:
+    """Extract text from one upload and remember it for follow-up questions."""
     path = save_upload(upload)
     try:
         text = extract.extract_text(path)
     finally:
         path.unlink(missing_ok=True)
 
-    result = redact.redact(text)
     document_id = uuid.uuid4().hex
-    DOCUMENTS[document_id] = result.redacted_text
-    return document_id, result
+    DOCUMENTS[document_id] = text
+    return ExtractedDocument(document_id=document_id, text=text)
 
 
 @app.get("/api/health", response_model=HealthResponse)
@@ -121,13 +131,11 @@ def health() -> HealthResponse:
 
 @app.post("/api/analyze", response_model=AnalyzeResponse)
 def analyze_document(file: UploadFile = File(...)) -> AnalyzeResponse:
-    """Extract, redact, and analyze one document."""
-    document_id, result = redact_upload(file)
+    """Extract and analyze one document."""
+    document = extract_upload(file)
     return AnalyzeResponse(
-        document_id=document_id,
-        redacted_text=result.redacted_text,
-        spans=result.spans,
-        analysis=analysis.analyze(result.redacted_text),
+        document_id=document.document_id,
+        analysis=analysis.analyze(document.text),
     )
 
 
@@ -135,31 +143,25 @@ def analyze_document(file: UploadFile = File(...)) -> AnalyzeResponse:
 def compare_documents(
     first: UploadFile = File(...), second: UploadFile = File(...)
 ) -> CompareResponse:
-    """Extract, redact, and compare two documents side by side."""
-    first_id, first_result = redact_upload(first)
-    second_id, second_result = redact_upload(second)
+    """Extract and compare two documents side by side."""
+    first_document = extract_upload(first)
+    second_document = extract_upload(second)
     return CompareResponse(
-        document_ids=[first_id, second_id],
-        redacted_texts=[first_result.redacted_text, second_result.redacted_text],
-        spans=[first_result.spans, second_result.spans],
-        comparison=analysis.compare(
-            first_result.redacted_text, second_result.redacted_text
-        ),
+        document_ids=[first_document.document_id, second_document.document_id],
+        comparison=analysis.compare(first_document.text, second_document.text),
     )
 
 
 @app.post("/api/question", response_model=QuestionResponse)
 def ask_question(request: QuestionRequest) -> QuestionResponse:
-    """Answer a follow-up question about an already redacted document."""
-    redacted_text = DOCUMENTS.get(request.document_id)
-    if redacted_text is None:
+    """Answer a follow-up question about a document already extracted."""
+    text = DOCUMENTS.get(request.document_id)
+    if text is None:
         raise HTTPException(
             status_code=404,
             detail="Unknown document id. Upload the document again.",
         )
-    return QuestionResponse(
-        answer=analysis.answer_question(redacted_text, request.question)
-    )
+    return QuestionResponse(answer=analysis.answer_question(text, request.question))
 
 
 if FRONTEND_DIST.is_dir():

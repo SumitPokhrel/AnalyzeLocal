@@ -5,25 +5,26 @@ tax returns entirely on your own machine. You never upload your documents to a
 cloud AI service like ChatGPT or Claude. Every step runs locally, so your
 documents never leave your computer.
 
-It detects and redacts personal information, then produces a plain-language
-analysis and comparison, all on-device.
+It reads the document and produces a plain-language analysis and comparison,
+all on-device.
 
 ## What it does
 
 - Reads PDF, docx, and plain text documents.
-- Redacts personal information. Structured items like SSNs, account numbers,
-  emails, and phone numbers are caught by pattern matching. Unstructured items
-  like names, addresses, and employers are caught by a local NER model.
-- Lets you review and confirm the redactions.
-- Analyzes the redacted content with a local language model, including
-  comparing two documents side by side.
+- Analyzes the content with a local language model, including comparing two
+  documents side by side.
 - Lets you ask follow-up questions about the document in a simple chat box.
+
+Because everything runs on your own machine, nothing is stripped out of the
+document before analysis. The model sees the salary figures, the dates, and the
+names, which is what makes the analysis useful.
 
 ## Requirements
 
-- An Apple Silicon Mac (M1 or newer). Intel Macs are not supported. Supporting windows is the next step. 
+- An Apple Silicon Mac (M1 or newer). Intel Macs are not supported.
 - macOS, with about 16GB of memory recommended.
-- Python 3.10 or newer.
+- Python 3.10 or newer. Read the note in step 3, because the python3 that
+  ships with macOS is usually older than this.
 - Node.js, used to build the web interface. TypeScript and the other build
   tools install with it in the next step, so nothing needs to be set up
   globally.
@@ -46,13 +47,38 @@ cd AnalyzeLocal
 ollama pull qwen3:8b
 ```
 
-3. Install the Python backend dependencies.
+3. Create a virtual environment, activate it, and install the backend
+   dependencies.
 
 ```
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
 pip install -r backend/requirements.txt
 ```
 
-If you prefer to isolate dependencies, create a virtual environment first.
+Check the Python version inside the activated environment before you install:
+
+```
+python --version
+```
+
+That has to report 3.10 or newer. Check it here rather than checking python3
+outside the environment, because the version that matters is the one the
+environment was built with.
+
+On macOS this is the step that usually goes wrong. The system python3 is
+often 3.9, and a virtual environment built with it inherits that version. The
+install still succeeds, and the failure only appears when you start the app:
+
+```
+TypeError: unsupported operand type(s) for |: 'type' and 'NoneType'
+```
+
+That comes from the str | None annotation in backend/pipeline/model.py, which
+is valid from Python 3.10 onward. If you see it, delete .venv, install a newer
+Python, and rebuild the environment with that interpreter, for example
+python3.12 -m venv .venv.
 
 4. Build the web interface.
 
@@ -66,6 +92,14 @@ cd ..
 The build type checks the TypeScript first, so a type error stops it before
 anything is bundled.
 
+The virtual environment is only active in the shell you activated it in. In
+every new terminal session, activate it again from the project root before
+running the app or the tests.
+
+```
+source .venv/bin/activate
+```
+
 ## Run
 
 Start the app with a single command from the project root.
@@ -76,19 +110,24 @@ python backend/app.py
 
 This starts the local server and serves the interface at
 http://localhost:8000. Open that address in your browser, upload a document,
-review the redactions, and read the analysis.
+and read the analysis.
 
 All traffic stays on your machine. The browser talks to the local backend over
 localhost, which is loopback and never touches the internet.
 
 ## Tests
 
-Install the test dependencies, then run pytest from the project root.
+With the virtual environment active, install the test dependencies into it,
+then run pytest from the project root.
 
 ```
+source .venv/bin/activate
 pip install -r backend/requirements-dev.txt
 pytest
 ```
+
+The test dependencies are separate from backend/requirements.txt, so running
+the app does not install test tooling. They go into the same environment.
 
 The test documents are generated while the tests run, so there are no binary
 fixtures in the repository. Ollama does not need to be running.
@@ -117,10 +156,9 @@ Ollama uses Q4_K_M quantization by default, which is the right balance on a
 
 ## How it works
 
-The pipeline runs in this order: extract text, redact personal information,
-quick review, then analyze the redacted text. The analysis step only ever sees
-redacted content. The backend is Python and FastAPI. The interface is React and
-TypeScript, built with Vite. In a normal run, FastAPI serves both the built
+The pipeline has two steps: extract the text from the document, then analyze it
+with the local model. The backend is Python and FastAPI. The interface is React
+and TypeScript, built with Vite. In a normal run, FastAPI serves both the built
 interface and the API on one local port.
 
 The request and response types in frontend/src/api.ts are written by hand to

@@ -9,16 +9,16 @@ documents (job offers, leases, tax returns) entirely on the user's machine.
 The whole point is privacy: you never upload your documents to a cloud AI
 service like ChatGPT or Claude. Everything stays on your laptop, and no
 document, and no data derived from a document, ever leaves the computer. It
-detects and redacts PII, then produces a plain-language analysis and
-comparison locally.
+extracts the text and produces a plain-language analysis and comparison
+locally.
 
 ## Hard constraints (do not violate)
 
 - On-device only. The shipped application must make zero network calls. No
   cloud APIs, no telemetry, no analytics, no update pings, no crash reporting
   that transmits data.
-- All models run locally. Any LLM or NER model is downloaded once and runs
-  offline afterward.
+- All models run locally. The model is downloaded once and runs offline
+  afterward.
 - Apple Silicon macOS only for the first version. Target M1 and newer. Do not
   add Windows, Linux, or Intel Mac code paths yet. Structure the code so a
   Windows port is possible later, but do not build it now.
@@ -36,22 +36,28 @@ comparison locally.
   venv is used, keep it optional and documented in one line.
 - Favor the standard library and mature packages over exotic ones.
 
-## Pipeline (redact first, then analyze)
+## Pipeline (extract, then analyze)
 
-Keep the flow simple and the steps light. Redaction should not feel heavy.
+Two steps. Keep the flow simple and the steps light.
 
 1. Extract text from the input document (PDF, docx, plain text).
-2. Redact PII on the extracted text:
-   - Regex and checksums for structured items (SSN, EIN, account numbers,
-     emails, phone numbers, dates).
-   - A local NER model (for example GLiNER) for names, addresses, employers,
-     and other unstructured entities.
-3. Quick review: show the user what was redacted so they can confirm or fix
-   it. Keep this fast and skippable, not a heavy mandatory gate.
-4. Analyze the redacted text with a local LLM (for example comparing two job
-   offers). This step only ever sees redacted content.
+2. Analyze the extracted text with a local LLM, including comparing two
+   documents and answering follow-up questions about one.
 
-Build steps 1, 2, and 4 first. Add the review in step 3 once the core works.
+## On redaction (deliberately deferred, not forgotten)
+
+An earlier version of this plan redacted PII between those two steps. That was
+cut by decision, for two reasons. Privacy here comes from locality, so
+redacting before handing text to a model running on the same machine protects
+against nothing. And redaction actively degrades the analysis, because the
+salary figures, employer names, dates, and addresses are the substance of what
+the user wants reasoned about.
+
+It may come back later as an optional feature attached to an export or copy
+action, for the case where someone wants to paste a sanitized version into a
+cloud model for a second opinion. That is a real workflow and the reason the
+door is left open. It is not part of the core pipeline, and it should not be
+reintroduced as one.
 
 ## Model runtime
 
@@ -69,15 +75,15 @@ Build steps 1, 2, and 4 first. Add the review in step 3 once the core works.
 A simple local web dashboard. Not fancy.
 
 - React frontend written in TypeScript, built with Vite. The user can upload a
-  PDF, docx, or text file, see the redaction and analysis, and ask follow-up
-  questions about the document in a basic chat box.
+  PDF, docx, or text file, read the analysis, and ask follow-up questions about
+  the document in a basic chat box.
 - A local Python backend (for example FastAPI) exposes the pipeline to the
   frontend. The frontend talks to it over localhost only.
 - Localhost traffic stays on the machine, so this does not break the on-device
   rule. There are still no calls to the internet.
-- Keep the UI minimal: an upload area, a results view for the redacted
-  analysis, and a question box. No accounts, no settings sprawl, no styling
-  beyond clean and readable.
+- Keep the UI minimal: an upload area, a results view for the analysis, and a
+  question box. No accounts, no settings sprawl, no styling beyond clean and
+  readable.
 
 ## Coding conventions
 

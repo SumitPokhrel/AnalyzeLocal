@@ -18,12 +18,6 @@ OLLAMA_URL: str = os.environ.get("ANALYZELOCAL_OLLAMA_URL", "http://127.0.0.1:11
 # this is deliberately generous.
 OLLAMA_TIMEOUT: float = float(os.environ.get("ANALYZELOCAL_OLLAMA_TIMEOUT", "300"))
 
-# Local NER model used for unstructured PII. Downloaded once on first use,
-# then runs offline.
-NER_MODEL_NAME: str = os.environ.get(
-    "ANALYZELOCAL_NER_MODEL", "urchade/gliner_multi_pii-v1"
-)
-
 # Address the backend binds to. Loopback only. Do not change this to 0.0.0.0,
 # which would expose uploaded documents to the local network.
 HOST: str = "127.0.0.1"

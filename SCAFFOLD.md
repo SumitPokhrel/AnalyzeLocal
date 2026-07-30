@@ -1,9 +1,8 @@
 # SCAFFOLD.md - AnalyzeLocal
 
-Initial build plan for the repo. Use this together with CLAUDE.md. Point
-Claude Code at both files, then ask it to scaffold the structure below. Do not
-implement model, redaction, or analysis logic in this pass. Build the structure
-and wiring only, so the app runs and the empty UI loads in the browser.
+Build plan for the repo. Use this together with CLAUDE.md. The pipeline is two
+steps, extract then analyze. Redaction was considered and deliberately cut, for
+the reasons recorded in CLAUDE.md.
 
 ## Target structure
 
@@ -13,9 +12,8 @@ backend/                Python, FastAPI
   pipeline/
     __init__.py
     extract.py          Extract text from PDF, docx, and plain text.
-    redact.py           Regex and checksum detectors, plus a GLiNER NER pass.
-    analyze.py          Local LLM analysis and question answering over
-                        redacted text.
+    analyze.py          Local LLM analysis, comparison, and question
+                        answering over the extracted text.
     model.py            Load and run the local model. Default is Qwen3 8B at
                         Q4_K_M through Ollama, with the model name in config
                         so it can be swapped.
@@ -46,15 +44,16 @@ frontend/               React and TypeScript, built with Vite
     styles.css
     components/
       UploadArea.tsx    File picker.
-      ResultsView.tsx   Redacted text and analysis panes.
+      ResultsView.tsx   Analysis panes.
       QuestionBox.tsx   Follow-up question input.
 README.md               Clone, install, download model, and run steps.
 
 ## Architecture
 
-Data flows in one direction, top to bottom. The two things worth reading off
-this diagram are that every address is loopback, and that the redaction
-boundary sits above the analysis step rather than below it.
+Data flows in one direction, top to bottom. The thing worth reading off this
+diagram is the loopback boundary at the bottom. Every address in the whole
+system is 127.0.0.1, and no arrow leaves the machine. That is the property the
+privacy claim rests on, so it is the one to check when reviewing a change.
 
 ```
 +----------------------------------------------------------------------+
@@ -72,7 +71,7 @@ boundary sits above the analysis step rather than below it.
 |  FastAPI at 127.0.0.1:8000, backend/app.py                           |
 |                                                                      |
 |  Serves the built frontend and the API on one port                   |
-|  DOCUMENTS: redacted text held in memory for follow-up               |
+|  DOCUMENTS: extracted text held in memory for follow-up              |
 |  questions, never written to disk                                    |
 +----------------------------------------------------------------------+
       |
@@ -84,17 +83,8 @@ boundary sits above the analysis step rather than below it.
       |
       v
 +----------------------------------------------------------------------+
-|  pipeline/redact.py                                                  |
-|  Pass 1: patterns and checksums for SSN, EIN, accounts, emails       |
-|  Pass 2: local GLiNER model for names, addresses, employers          |
-+----------------------------------------------------------------------+
-      |
-      |  redaction boundary
-      |  nothing below this line ever sees raw document text
-      v
-+----------------------------------------------------------------------+
 |  pipeline/analyze.py                                                 |
-|  Builds prompts over redacted text only                              |
+|  Builds prompts for analysis, comparison, and follow-up questions    |
 +----------------------------------------------------------------------+
       |
       v
@@ -103,11 +93,17 @@ boundary sits above the analysis step rather than below it.
 |  httpx to the Ollama HTTP API at 127.0.0.1:11434                     |
 |  Default model qwen3:8b at Q4_K_M, swappable in config.py            |
 +----------------------------------------------------------------------+
+      |
+      |  loopback boundary
+      |  every address above is 127.0.0.1, and there is no box below
+      |  this line. Nothing in the shipped app crosses to the internet.
+      v
+     none
 ```
 
 Uploads are written to a temporary file, read once by the extractor, and
-deleted in a finally block. The GLiNER weights and the Ollama model are the
-only downloads, both one time, and both run offline afterwards.
+deleted in a finally block. The Ollama model is the only download, one time,
+and it runs offline afterwards.
 
 ## Model and how to swap it
 
@@ -127,7 +123,7 @@ Comparable local models that fit a 16GB M1 with headroom:
 
 Ollama uses Q4_K_M by default, which is the right quantization here. Avoid 12B
 and larger as the default on 16GB. They load, but leave little headroom next to
-GLiNER, FastAPI, and the browser.
+FastAPI and the browser.
 
 ## How it should run
 
@@ -146,16 +142,15 @@ GLiNER, FastAPI, and the browser.
 - The interfaces in api.ts are kept in step with backend/schemas.py by hand.
   There is no code generation between them, so both sides change together.
 - No emojis, decorative symbols, or em dashes anywhere in code or docs.
-- Leave clear TODO markers in each stub.
-- Do not implement model logic, redaction rules, or analysis yet. Only build
-  the structure and wiring so the app runs and the empty UI loads.
+- Leave clear TODO markers in anything left as a stub.
+- Do not reintroduce a redaction stage into the core pipeline. See CLAUDE.md
+  for why it was cut and the one form in which it could come back.
 
 ## Build order
 
 1. Text extraction (extract.py). Done, covered by backend/tests.
-2. Redaction (redact.py): regex and checksums first, then GLiNER. Next.
-3. Analysis and question answering (analyze.py) on redacted text.
-4. Wire the frontend to the backend, then add the quick redaction review.
+2. Analysis, comparison, and question answering (analyze.py). Next.
+3. Wire the frontend to the backend so results and follow-up questions render.
 
 Each step lands with tests. A bug that gets fixed gets a test that fails
 without the fix, so the same mistake cannot come back quietly.

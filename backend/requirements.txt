@@ -9,7 +9,3 @@ httpx>=0.28
 # Document text extraction
 pypdf>=5.1
 python-docx>=1.1
-
-# Local NER model for unstructured PII. Pulls in torch, which is a large
-# download on first install.
-gliner>=0.2.13

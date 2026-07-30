@@ -1,5 +1,5 @@
-"""Document pipeline: extract text, redact PII, then analyze the redacted text.
+"""Document pipeline: extract text from a document, then analyze it.
 
-The order matters. Nothing in analyze.py may ever see text that has not been
-through redact.py.
+Two steps. extract.py turns a file into plain text, and analyze.py reasons
+over that text using the local model.
 """

@@ -2,7 +2,7 @@
 
 These cover behavior that does not change as the pipeline is filled in. The
 stubbed routes are deliberately not asserted on here, because their responses
-change the moment redaction and analysis are implemented.
+change the moment analysis is implemented.
 """
 
 from pathlib import Path
