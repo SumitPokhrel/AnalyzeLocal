@@ -149,8 +149,12 @@ FastAPI and the browser.
 ## Build order
 
 1. Text extraction (extract.py). Done, covered by backend/tests.
-2. Analysis, comparison, and question answering (analyze.py). Next.
-3. Wire the frontend to the backend so results and follow-up questions render.
+2. Analysis, comparison, and question answering (analyze.py). Done, covered
+   by backend/tests.
+3. Wire the frontend to the backend so results and follow-up questions
+   render. Done, covered by backend/tests and frontend/src/api.test.ts. The
+   analyze, compare, and question routes stream newline delimited JSON, so
+   text starts arriving in about a second rather than after the full run.
 
 Each step lands with tests. A bug that gets fixed gets a test that fails
 without the fix, so the same mistake cannot come back quietly.

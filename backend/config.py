@@ -15,8 +15,36 @@ MODEL_NAME: str = os.environ.get("ANALYZELOCAL_MODEL", "qwen3:8b")
 OLLAMA_URL: str = os.environ.get("ANALYZELOCAL_OLLAMA_URL", "http://127.0.0.1:11434")
 
 # Seconds to wait for a model response. Generation on an M1 can be slow, so
-# this is deliberately generous.
+# this is deliberately generous. Used as the read timeout specifically.
 OLLAMA_TIMEOUT: float = float(os.environ.get("ANALYZELOCAL_OLLAMA_TIMEOUT", "300"))
+
+# Context window requested on every call. Keep this constant. Changing it
+# between requests makes Ollama reload the model, measured at 2.4 seconds,
+# and throws away the prompt cache that makes follow-up questions fast.
+OLLAMA_NUM_CTX: int = int(os.environ.get("ANALYZELOCAL_NUM_CTX", "8192"))
+
+# Cap on tokens generated per call.
+OLLAMA_NUM_PREDICT: int = int(os.environ.get("ANALYZELOCAL_NUM_PREDICT", "800"))
+
+# How long Ollama keeps the model resident after a call. Keeping it loaded
+# avoids paying the cold start again on the next question.
+OLLAMA_KEEP_ALIVE: str = os.environ.get("ANALYZELOCAL_KEEP_ALIVE", "5m")
+
+# Qwen3 is a hybrid reasoning model, and Ollama turns thinking on by default
+# for any model that supports it. Thinking tokens come out of the same budget
+# as the answer. Measured on qwen3:8b at num_ctx 8192: the same analysis took
+# 615 tokens and 37.4 seconds with thinking on, and 151 tokens and 8.3
+# seconds with it off. Worse, a small budget can be spent entirely on
+# reasoning, which returns an empty answer with done_reason "length".
+# Leave this off unless you are deliberately measuring it.
+OLLAMA_THINK: bool = os.environ.get("ANALYZELOCAL_THINK", "false").lower() == "true"
+
+# Tokens of the context window set aside for the document itself. The rest
+# covers the system prompt, the answer, and follow-up history.
+DOCUMENT_TOKEN_BUDGET: int = int(os.environ.get("ANALYZELOCAL_DOCUMENT_TOKENS", "6400"))
+
+# Question and answer pairs kept per document for follow-up context.
+HISTORY_TURNS: int = 3
 
 # Address the backend binds to. Loopback only. Do not change this to 0.0.0.0,
 # which would expose uploaded documents to the local network.

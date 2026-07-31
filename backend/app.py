@@ -10,6 +10,7 @@ Run it with: python backend/app.py
 import tempfile
 import uuid
 import webbrowser
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 from threading import Timer
 from typing import NamedTuple
@@ -17,19 +18,23 @@ from typing import NamedTuple
 import uvicorn
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 import config
 from pipeline import analyze as analysis
 from pipeline import extract, model
 from schemas import (
-    AnalyzeResponse,
-    CompareResponse,
+    DoneEvent,
     HealthResponse,
     QuestionRequest,
-    QuestionResponse,
+    StreamEvent,
+    TokenEvent,
 )
+
+# Newline delimited JSON. One event per line, so the frontend can act on each
+# as it arrives instead of waiting for a complete body.
+NDJSON_MEDIA_TYPE = "application/x-ndjson"
 
 FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 
@@ -37,6 +42,11 @@ FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 # never written to disk, and dropped when the process exits. This is what the
 # follow-up question route reads from.
 DOCUMENTS: dict[str, str] = {}
+
+# Recent question and answer pairs per document, so a follow-up like "and the
+# bonus?" has something to refer back to. Capped at config.HISTORY_TURNS,
+# because history competes with the document for the context window.
+HISTORY: dict[str, list[tuple[str, str]]] = {}
 
 
 class ExtractedDocument(NamedTuple):
@@ -129,31 +139,47 @@ def health() -> HealthResponse:
     )
 
 
-@app.post("/api/analyze", response_model=AnalyzeResponse)
-def analyze_document(file: UploadFile = File(...)) -> AnalyzeResponse:
-    """Extract and analyze one document."""
+def ndjson(events: Iterable[StreamEvent]) -> Iterator[str]:
+    """Serialize pipeline events as newline delimited JSON."""
+    for event in events:
+        yield event.model_dump_json() + "\n"
+
+
+def stream(events: Iterable[StreamEvent]) -> StreamingResponse:
+    """Wrap pipeline events in a streaming HTTP response."""
+    return StreamingResponse(ndjson(events), media_type=NDJSON_MEDIA_TYPE)
+
+
+@app.post("/api/analyze")
+def analyze_document(file: UploadFile = File(...)) -> StreamingResponse:
+    """Extract and analyze one document, streaming the answer.
+
+    Extraction runs here rather than inside the stream, so an unsupported
+    file, an oversized upload, or a scanned PDF still gets a real status
+    code instead of a 200 carrying an error event.
+    """
     document = extract_upload(file)
-    return AnalyzeResponse(
-        document_id=document.document_id,
-        analysis=analysis.analyze(document.text),
-    )
+    return stream(analysis.stream_analysis(document.text, [document.document_id]))
 
 
-@app.post("/api/compare", response_model=CompareResponse)
+@app.post("/api/compare")
 def compare_documents(
     first: UploadFile = File(...), second: UploadFile = File(...)
-) -> CompareResponse:
-    """Extract and compare two documents side by side."""
+) -> StreamingResponse:
+    """Extract and compare two documents, streaming all three model calls."""
     first_document = extract_upload(first)
     second_document = extract_upload(second)
-    return CompareResponse(
-        document_ids=[first_document.document_id, second_document.document_id],
-        comparison=analysis.compare(first_document.text, second_document.text),
+    return stream(
+        analysis.stream_comparison(
+            first_document.text,
+            second_document.text,
+            [first_document.document_id, second_document.document_id],
+        )
     )
 
 
-@app.post("/api/question", response_model=QuestionResponse)
-def ask_question(request: QuestionRequest) -> QuestionResponse:
+@app.post("/api/question")
+def ask_question(request: QuestionRequest) -> StreamingResponse:
     """Answer a follow-up question about a document already extracted."""
     text = DOCUMENTS.get(request.document_id)
     if text is None:
@@ -161,7 +187,25 @@ def ask_question(request: QuestionRequest) -> QuestionResponse:
             status_code=404,
             detail="Unknown document id. Upload the document again.",
         )
-    return QuestionResponse(answer=analysis.answer_question(text, request.question))
+
+    history = HISTORY.get(request.document_id, [])
+
+    def events() -> Iterator[StreamEvent]:
+        """Forward the answer, recording it only if it finished cleanly."""
+        collected: list[str] = []
+        for event in analysis.stream_answer(text, request.question, history):
+            if isinstance(event, TokenEvent):
+                collected.append(event.text)
+            elif isinstance(event, DoneEvent):
+                # An interrupted or cut off answer is not kept. Feeding a
+                # half finished answer back as context poisons later turns.
+                HISTORY[request.document_id] = [
+                    *history,
+                    (request.question, "".join(collected)),
+                ][-config.HISTORY_TURNS :]
+            yield event
+
+    return stream(events())
 
 
 if FRONTEND_DIST.is_dir():

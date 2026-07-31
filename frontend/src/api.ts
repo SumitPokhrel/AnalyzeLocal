@@ -3,6 +3,9 @@
 //
 // The types below mirror the Pydantic models in backend/schemas.py. Keep the
 // two in step: a field renamed there has to be renamed here.
+//
+// The analyze, compare, and question routes stream newline delimited JSON.
+// Each line is one StreamEvent, discriminated by the event field.
 
 export interface HealthResponse {
   status: string;
@@ -10,49 +13,186 @@ export interface HealthResponse {
   ollama_available: boolean;
 }
 
-export interface AnalyzeResponse {
-  document_id: string;
-  analysis: string;
+export interface StatusEvent {
+  event: "status";
+  stage: string;
+  message: string;
 }
 
-// The compare route exists on the backend but has no caller in the UI yet.
-export interface CompareResponse {
+export interface MetaEvent {
+  event: "meta";
   document_ids: string[];
-  comparison: string;
+  document_type: string;
+  truncated: boolean;
 }
 
-export interface QuestionResponse {
-  answer: string;
+export interface TokenEvent {
+  event: "token";
+  stage: string;
+  text: string;
 }
 
-// Shape of the error body FastAPI returns on a failed request.
+export interface WarningEvent {
+  event: "warning";
+  unverified: string[];
+}
+
+export interface DoneEvent {
+  event: "done";
+}
+
+export interface IncompleteEvent {
+  event: "incomplete";
+  reason: "length" | "interrupted";
+  detail: string;
+}
+
+export interface ErrorEvent {
+  event: "error";
+  detail: string;
+}
+
+export type StreamEvent =
+  | StatusEvent
+  | MetaEvent
+  | TokenEvent
+  | WarningEvent
+  | DoneEvent
+  | IncompleteEvent
+  | ErrorEvent;
+
+export type StreamEventHandler = (event: StreamEvent) => void;
+
+// Shape of the error body FastAPI returns on a request that fails before
+// streaming starts.
 interface ErrorBody {
   detail?: string;
 }
 
-async function request<T>(path: string, options?: RequestInit): Promise<T> {
-  const response = await fetch(path, options);
+const TERMINAL_EVENTS = new Set(["done", "incomplete", "error"]);
+
+// Used when the stream stops without a terminal event, which means the
+// connection dropped partway through. The text on screen is unfinished and
+// the quote check never ran, so it cannot be presented as an answer.
+export const DROPPED_STREAM: IncompleteEvent = {
+  event: "incomplete",
+  reason: "interrupted",
+  detail:
+    "The connection to the local backend stopped before the answer finished, " +
+    "so the quote check did not run. Nothing above has been checked against " +
+    "the document.",
+};
+
+/**
+ * Split buffered stream text into whole events, keeping any partial line.
+ *
+ * A read from the network does not land on line boundaries, so a JSON object
+ * can arrive split across two chunks. Whatever follows the last newline is
+ * returned as the new buffer rather than parsed.
+ */
+export function parseNdjsonChunk(
+  buffer: string,
+  chunk: string
+): [StreamEvent[], string] {
+  const lines = (buffer + chunk).split("\n");
+  const remainder = lines.pop() ?? "";
+  const events: StreamEvent[] = [];
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed) {
+      events.push(JSON.parse(trimmed) as StreamEvent);
+    }
+  }
+  return [events, remainder];
+}
+
+async function readStream(
+  response: Response,
+  onEvent: StreamEventHandler
+): Promise<void> {
   if (!response.ok) {
     const body = (await response.json().catch(() => ({}))) as ErrorBody;
     throw new Error(body.detail || `Request failed with status ${response.status}`);
   }
-  return (await response.json()) as T;
+  if (!response.body) {
+    throw new Error("This browser cannot read a streamed response.");
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let sawTerminal = false;
+
+  const emit = (events: StreamEvent[]): void => {
+    for (const event of events) {
+      if (TERMINAL_EVENTS.has(event.event)) {
+        sawTerminal = true;
+      }
+      onEvent(event);
+    }
+  };
+
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+    const [events, rest] = parseNdjsonChunk(buffer, decoder.decode(value, { stream: true }));
+    buffer = rest;
+    emit(events);
+  }
+
+  // Flush anything left after the final read, then report a dropped stream.
+  const [tail] = parseNdjsonChunk(buffer, "\n");
+  emit(tail);
+  if (!sawTerminal) {
+    onEvent(DROPPED_STREAM);
+  }
 }
 
-export function getHealth(): Promise<HealthResponse> {
-  return request<HealthResponse>("/api/health");
+export async function getHealth(): Promise<HealthResponse> {
+  const response = await fetch("/api/health");
+  if (!response.ok) {
+    throw new Error(`Request failed with status ${response.status}`);
+  }
+  return (await response.json()) as HealthResponse;
 }
 
-export function analyzeDocument(file: File): Promise<AnalyzeResponse> {
+export async function streamAnalyze(
+  file: File,
+  onEvent: StreamEventHandler
+): Promise<void> {
   const form = new FormData();
   form.append("file", file);
-  return request<AnalyzeResponse>("/api/analyze", { method: "POST", body: form });
+  await readStream(
+    await fetch("/api/analyze", { method: "POST", body: form }),
+    onEvent
+  );
 }
 
-export function askQuestion(documentId: string, question: string): Promise<QuestionResponse> {
-  return request<QuestionResponse>("/api/question", {
+export async function streamCompare(
+  first: File,
+  second: File,
+  onEvent: StreamEventHandler
+): Promise<void> {
+  const form = new FormData();
+  form.append("first", first);
+  form.append("second", second);
+  await readStream(
+    await fetch("/api/compare", { method: "POST", body: form }),
+    onEvent
+  );
+}
+
+export async function streamQuestion(
+  documentId: string,
+  question: string,
+  onEvent: StreamEventHandler
+): Promise<void> {
+  const response = await fetch("/api/question", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ document_id: documentId, question }),
   });
+  await readStream(response, onEvent);
 }

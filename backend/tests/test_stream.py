@@ -1,0 +1,323 @@
+"""Tests for the streaming routes and the event sequence they produce.
+
+model.generate_stream is replaced with a fake, so none of this needs Ollama.
+"""
+
+import json
+from collections.abc import Iterator
+from pathlib import Path
+
+import pytest
+from fastapi.testclient import TestClient
+
+import app as app_module
+import config
+from app import app
+from pipeline import analyze, model
+
+
+@pytest.fixture(scope="module")
+def client() -> TestClient:
+    """A test client that returns error responses instead of raising."""
+    return TestClient(app, raise_server_exceptions=False)
+
+
+def chunks(*texts: str, done_reason: str = "stop") -> Iterator[model.ModelChunk]:
+    """Build a streamed reply ending with the given reason."""
+    for text in texts:
+        yield model.ModelChunk(text=text, done_reason=None)
+    yield model.ModelChunk(text="", done_reason=done_reason)
+
+
+def install(monkeypatch: pytest.MonkeyPatch, maker) -> list[str]:
+    """Replace the model stream. Returns the list of prompts it was given."""
+    prompts: list[str] = []
+
+    def generate_stream(prompt: str, system: str | None = None):
+        prompts.append(prompt)
+        return maker()
+
+    monkeypatch.setattr(model, "generate_stream", generate_stream)
+    return prompts
+
+
+def events(response) -> list[dict]:
+    """Parse an ndjson response body into event dicts."""
+    return [json.loads(line) for line in response.text.splitlines() if line.strip()]
+
+
+def names(response) -> list[str]:
+    """The event names in order."""
+    return [item["event"] for item in events(response)]
+
+
+def upload(client: TestClient, path: Path):
+    return client.post("/api/analyze", files={"file": (path.name, path.read_bytes())})
+
+
+# The utf8 fixture document reads "Base salary: 145000 USD", so QUOTED is
+# verbatim from it and INVENTED is not.
+QUOTED = 'The pay is "Base salary: 145000 USD".'
+INVENTED = 'The pay is "Base salary: 999999 USD".'
+
+
+def test_analyze_streams_ndjson(
+    client: TestClient, documents: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The route answers with newline delimited JSON, not a single body."""
+    install(monkeypatch, lambda: chunks("Base salary ", "is 145000 USD."))
+    response = upload(client, documents["utf8"])
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/x-ndjson")
+
+
+def test_analyze_event_order(
+    client: TestClient, documents: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Meta arrives before any token, and done is last."""
+    install(monkeypatch, lambda: chunks("Base ", "salary."))
+    order = names(upload(client, documents["utf8"]))
+    assert order[0] == "meta"
+    assert order[1] == "status"
+    assert order[-1] == "done"
+    assert order.count("token") == 2
+
+
+def test_analyze_meta_carries_type_and_truncation(
+    client: TestClient, documents: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The detected type and truncation flag reach the client before text."""
+    install(monkeypatch, lambda: chunks("text"))
+    meta = events(upload(client, documents["utf8"]))[0]
+    assert meta["truncated"] is False
+    assert len(meta["document_ids"]) == 1
+    assert meta["document_type"] in {"job_offer", "lease", "tax_return", "generic"}
+
+
+def test_warning_follows_the_answer(
+    client: TestClient, documents: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An invented quote produces a warning event after the tokens."""
+    install(monkeypatch, lambda: chunks(INVENTED))
+    order = names(upload(client, documents["utf8"]))
+    assert order.index("warning") > order.index("token")
+    assert order[-1] == "done"
+
+
+def test_clean_answer_has_no_warning(
+    client: TestClient, documents: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An answer whose quotes check out emits no warning event."""
+    install(monkeypatch, lambda: chunks(QUOTED))
+    assert "warning" not in names(upload(client, documents["utf8"]))
+
+
+def test_output_cap_ends_with_incomplete_not_done(
+    client: TestClient, documents: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Hitting num_predict is reported, not passed off as a finished answer.
+
+    Under streaming a capped answer just looks like text stopping, which is
+    the same invisible failure as an empty response. The terminal event says
+    so instead.
+    """
+    install(monkeypatch, lambda: chunks(QUOTED, done_reason="length"))
+    order = names(upload(client, documents["utf8"]))
+    assert "done" not in order
+    assert order[-1] == "incomplete"
+
+    final = events(upload(client, documents["utf8"]))[-1]
+    assert final["reason"] == "length"
+
+
+def test_output_cap_still_runs_the_quote_check(
+    client: TestClient, documents: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A capped answer is short, but what arrived is still checked."""
+    install(monkeypatch, lambda: chunks(INVENTED, done_reason="length"))
+    order = names(upload(client, documents["utf8"]))
+    assert order.index("warning") < order.index("incomplete")
+
+
+def test_interrupted_stream_says_the_answer_is_incomplete(
+    client: TestClient, documents: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Generation breaking partway is reported rather than rendered as done.
+
+    The reader is looking at text that was never checked, so silence here
+    would be worse than the truncation it resembles.
+    """
+
+    def breaks() -> Iterator[model.ModelChunk]:
+        yield model.ModelChunk(text="Base salary is ", done_reason=None)
+        raise model.ModelError("the connection dropped")
+
+    install(monkeypatch, breaks)
+    response = upload(client, documents["utf8"])
+    order = names(response)
+    assert order[-1] == "incomplete"
+    assert events(response)[-1]["reason"] == "interrupted"
+
+
+def test_interrupted_stream_emits_no_warning(
+    client: TestClient, documents: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No warning event, because the quote check never ran.
+
+    The absence has to be stated by the incomplete event, since a missing
+    warning would otherwise read as a clean bill of health.
+    """
+
+    def breaks() -> Iterator[model.ModelChunk]:
+        yield model.ModelChunk(text=INVENTED, done_reason=None)
+        raise model.ModelError("the connection dropped")
+
+    install(monkeypatch, breaks)
+    response = upload(client, documents["utf8"])
+    assert "warning" not in names(response)
+    assert "did not run" in events(response)[-1]["detail"]
+
+
+def test_failure_before_any_text_is_an_error(
+    client: TestClient, documents: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A model failure with nothing on screen is an error, not an incomplete."""
+
+    def refuse() -> Iterator[model.ModelChunk]:
+        raise model.ModelError("Check that Ollama is running.")
+        yield  # pragma: no cover
+
+    install(monkeypatch, refuse)
+    response = upload(client, documents["utf8"])
+    order = names(response)
+    assert order[-1] == "error"
+    assert "Ollama" in events(response)[-1]["detail"]
+
+
+def test_empty_answer_is_an_error(
+    client: TestClient, documents: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stream that produces no text at all is reported.
+
+    This is the shape the thinking-budget failure takes: the model returns
+    normally, having spent the whole budget on reasoning.
+    """
+    install(monkeypatch, lambda: chunks(done_reason="length"))
+    response = upload(client, documents["utf8"])
+    assert names(response)[-1] == "error"
+    assert "empty answer" in events(response)[-1]["detail"]
+
+
+def test_extraction_failure_stays_a_real_status_code(
+    client: TestClient, documents: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Extraction runs before the stream opens, so 422 survives."""
+    install(monkeypatch, lambda: chunks("unused"))
+    response = upload(client, documents["scanned_pdf"])
+    assert response.status_code == 422
+    assert "scan" in response.json()["detail"]
+
+
+def test_compare_streams_all_three_calls(
+    client: TestClient, documents: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both digests stream, not just the final comparison.
+
+    Two silent digests would be about a minute of dead air, which is most of
+    the wait.
+    """
+    install(monkeypatch, lambda: chunks("some text"))
+    response = client.post(
+        "/api/compare",
+        files={
+            "first": ("a.txt", documents["utf8"].read_bytes()),
+            "second": ("b.txt", documents["utf8"].read_bytes()),
+        },
+    )
+    assert response.status_code == 200
+    stages = [item["stage"] for item in events(response) if item["event"] == "token"]
+    assert set(stages) == {"reading_first", "reading_second", "comparing"}
+
+
+def test_compare_meta_holds_both_document_ids(
+    client: TestClient, documents: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Compare reports two ids in the same field shape as analyze."""
+    install(monkeypatch, lambda: chunks("some text"))
+    response = client.post(
+        "/api/compare",
+        files={
+            "first": ("a.txt", documents["utf8"].read_bytes()),
+            "second": ("b.txt", documents["utf8"].read_bytes()),
+        },
+    )
+    assert len(events(response)[0]["document_ids"]) == 2
+
+
+def test_question_streams_and_records_history(
+    client: TestClient, documents: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A finished answer is kept as context for the next question."""
+    prompts = install(monkeypatch, lambda: chunks("The salary is 145000 USD."))
+    document_id = events(upload(client, documents["utf8"]))[0]["document_ids"][0]
+
+    client.post(
+        "/api/question", json={"document_id": document_id, "question": "Salary?"}
+    )
+    assert app_module.HISTORY[document_id] == [("Salary?", "The salary is 145000 USD.")]
+
+    client.post(
+        "/api/question", json={"document_id": document_id, "question": "Bonus?"}
+    )
+    assert "Earlier question: Salary?" in prompts[-1]
+
+
+def test_history_is_capped(
+    client: TestClient, documents: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only the most recent turns are kept, since history costs context."""
+    install(monkeypatch, lambda: chunks("An answer."))
+    document_id = events(upload(client, documents["utf8"]))[0]["document_ids"][0]
+    for number in range(config.HISTORY_TURNS + 2):
+        client.post(
+            "/api/question",
+            json={"document_id": document_id, "question": f"Question {number}?"},
+        )
+    assert len(app_module.HISTORY[document_id]) == config.HISTORY_TURNS
+
+
+def test_interrupted_answer_is_not_kept_as_history(
+    client: TestClient, documents: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A half finished answer is not fed back into the next prompt.
+
+    Storing it would carry an unverified fragment into every later turn.
+    """
+    install(monkeypatch, lambda: chunks("A good answer."))
+    document_id = events(upload(client, documents["utf8"]))[0]["document_ids"][0]
+    app_module.HISTORY.pop(document_id, None)
+
+    def breaks() -> Iterator[model.ModelChunk]:
+        yield model.ModelChunk(text="half an ans", done_reason=None)
+        raise model.ModelError("dropped")
+
+    install(monkeypatch, breaks)
+    client.post(
+        "/api/question", json={"document_id": document_id, "question": "Salary?"}
+    )
+    assert document_id not in app_module.HISTORY
+
+
+def test_unknown_document_id_still_returns_404(client: TestClient) -> None:
+    """The lookup happens before the stream opens, so 404 survives."""
+    response = client.post(
+        "/api/question", json={"document_id": "missing", "question": "Salary?"}
+    )
+    assert response.status_code == 404
+
+
+def test_stage_constants_match_the_frontend_progress_set() -> None:
+    """The digest stages are the ones the interface routes to the progress area."""
+    assert analyze.STAGE_READING_FIRST == "reading_first"
+    assert analyze.STAGE_READING_SECOND == "reading_second"
+    assert analyze.STAGE_COMPARING == "comparing"

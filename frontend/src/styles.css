@@ -46,6 +46,67 @@ h2 {
   margin-top: 0.5rem;
 }
 
+.badge {
+  display: inline-block;
+  margin-left: 0.5rem;
+  padding: 0.1rem 0.5rem;
+  border: 1px solid #cccccc;
+  border-radius: 999px;
+  background: #f0f0f0;
+  font-size: 0.75rem;
+  font-weight: 400;
+  vertical-align: middle;
+  color: #555555;
+}
+
+.banner {
+  border: 1px solid #d8c48a;
+  background: #fdf7e6;
+  border-radius: 4px;
+  padding: 0.6rem 0.75rem;
+  margin-top: 0.75rem;
+  font-size: 0.9rem;
+}
+
+.banner.severe {
+  border-color: #d8a0a0;
+  background: #fdeeee;
+}
+
+.banner ul {
+  margin: 0.4rem 0 0;
+  padding-left: 1.2rem;
+}
+
+.progress {
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  max-height: 9rem;
+  overflow-y: auto;
+  background: #fafafa;
+  border: 1px dashed #d0d0d0;
+  border-radius: 4px;
+  padding: 0.5rem;
+  margin-top: 0.5rem;
+  font-size: 0.8rem;
+  color: #666666;
+}
+
+.upload {
+  display: block;
+}
+
+.upload label {
+  display: block;
+  margin-bottom: 0.75rem;
+  font-size: 0.9rem;
+}
+
+.upload input {
+  display: block;
+  margin-top: 0.25rem;
+}
+
 form {
   display: flex;
   gap: 0.5rem;

@@ -1,4 +1,4 @@
-import { defineConfig } from "vite";
+import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
 
 // During development the dev server proxies API calls to the local FastAPI
@@ -11,5 +11,9 @@ export default defineConfig({
     proxy: {
       "/api": "http://127.0.0.1:8000",
     },
+  },
+  test: {
+    environment: "node",
+    include: ["src/**/*.test.ts"],
   },
 });

@@ -1,8 +1,8 @@
 """Tests for the API routes in app.py.
 
-These cover behavior that does not change as the pipeline is filled in. The
-stubbed routes are deliberately not asserted on here, because their responses
-change the moment analysis is implemented.
+These cover the failures that happen before the stream opens, so they are
+still real HTTP status codes rather than events. What the routes stream once
+they are past this point is covered in test_stream.py.
 """
 
 from pathlib import Path
@@ -20,7 +20,7 @@ def client() -> TestClient:
     return TestClient(app, raise_server_exceptions=False)
 
 
-def upload(client: TestClient, path: Path) -> object:
+def upload(client: TestClient, path: Path):
     """Post one document to the analyze route."""
     return client.post("/api/analyze", files={"file": (path.name, path.read_bytes())})
 
