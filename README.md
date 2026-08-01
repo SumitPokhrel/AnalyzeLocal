@@ -60,7 +60,7 @@ Windows support is planned for a later version.
 1. Clone the repository.
 
 ```
-git clone https://github.com/<your-username>/AnalyzeLocal.git
+git clone https://github.com/SumitPokhrel/AnalyzeLocal.git
 cd AnalyzeLocal
 ```
 
