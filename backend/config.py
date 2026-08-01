@@ -23,8 +23,11 @@ OLLAMA_TIMEOUT: float = float(os.environ.get("ANALYZELOCAL_OLLAMA_TIMEOUT", "300
 # and throws away the prompt cache that makes follow-up questions fast.
 OLLAMA_NUM_CTX: int = int(os.environ.get("ANALYZELOCAL_NUM_CTX", "8192"))
 
-# Cap on tokens generated per call.
-OLLAMA_NUM_PREDICT: int = int(os.environ.get("ANALYZELOCAL_NUM_PREDICT", "800"))
+# Cap on tokens generated per call. Costs no memory: the KV cache is sized
+# from num_ctx alone, measured identical at 800, 1600, and 2400. At 1200 the
+# prompt and the answer still fit inside num_ctx with room to spare, so this
+# comes out of slack rather than out of the document budget.
+OLLAMA_NUM_PREDICT: int = int(os.environ.get("ANALYZELOCAL_NUM_PREDICT", "1200"))
 
 # How long Ollama keeps the model resident after a call. Keeping it loaded
 # avoids paying the cold start again on the next question.

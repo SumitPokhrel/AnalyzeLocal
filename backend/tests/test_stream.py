@@ -92,6 +92,7 @@ def test_analyze_meta_carries_type_and_truncation(
     assert meta["truncated"] is False
     assert len(meta["document_ids"]) == 1
     assert meta["document_type"] in {"job_offer", "lease", "tax_return", "generic"}
+    assert meta["unsupported_type"] is False
 
 
 def test_warning_follows_the_answer(
@@ -321,3 +322,204 @@ def test_stage_constants_match_the_frontend_progress_set() -> None:
     assert analyze.STAGE_READING_FIRST == "reading_first"
     assert analyze.STAGE_READING_SECOND == "reading_second"
     assert analyze.STAGE_COMPARING == "comparing"
+
+
+def overflowing(*texts: str, prompt_tokens: int = 0, eval_tokens: int = 50):
+    """A reply whose token counts say the context window was exceeded."""
+    tokens = prompt_tokens or config.OLLAMA_NUM_CTX
+
+    def maker() -> Iterator[model.ModelChunk]:
+        for text in texts:
+            yield model.ModelChunk(text=text, done_reason=None)
+        yield model.ModelChunk(
+            text="",
+            done_reason="stop",
+            prompt_tokens=tokens,
+            eval_tokens=eval_tokens,
+        )
+
+    return maker
+
+
+def fitting(*texts: str):
+    """A reply whose token counts sit comfortably inside the window."""
+
+    def maker() -> Iterator[model.ModelChunk]:
+        for text in texts:
+            yield model.ModelChunk(text=text, done_reason=None)
+        yield model.ModelChunk(
+            text="", done_reason="stop", prompt_tokens=1000, eval_tokens=100
+        )
+
+    return maker
+
+
+def alternating(monkeypatch: pytest.MonkeyPatch, makers: list) -> list[str]:
+    """Install a sequence of replies, one per call. Returns the prompts."""
+    prompts: list[str] = []
+    remaining = list(makers)
+
+    def generate_stream(prompt: str, system: str | None = None):
+        prompts.append(prompt)
+        return (remaining.pop(0) if len(remaining) > 1 else remaining[0])()
+
+    monkeypatch.setattr(model, "generate_stream", generate_stream)
+    return prompts
+
+
+def test_overflow_retries_once_and_announces_it(
+    client: TestClient, documents: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A first attempt that overflowed is discarded and rerun, visibly.
+
+    An unexplained doubled wait is worse than an explained one, so the
+    restart event carries the reason.
+    """
+    prompts = alternating(
+        monkeypatch, [overflowing("bad answer"), fitting(QUOTED)]
+    )
+    response = upload(client, documents["utf8"])
+    order = names(response)
+
+    assert "restart" in order
+    assert len(prompts) == 2
+    assert order[-1] == "done"
+
+    restart = next(e for e in events(response) if e["event"] == "restart")
+    assert restart["reason"] == "context_overflow"
+    assert "shorter excerpt" in restart["message"]
+
+
+def test_retry_is_sent_a_shorter_excerpt(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The second attempt carries less document text, sized from measurement.
+
+    Uses a large document, because that is the only case where retrying
+    means anything. The excerpt is what has to shrink: the prompt as a whole
+    also gains the fragment instruction on the second pass.
+    """
+    prompts = alternating(
+        monkeypatch,
+        [overflowing("bad answer", prompt_tokens=config.OLLAMA_NUM_CTX), fitting(QUOTED)],
+    )
+    path = tmp_path / "long.txt"
+    path.write_text("The tenant shall pay rent on the first of the month. " * 2000)
+    client.post("/api/analyze", files={"file": (path.name, path.read_bytes())})
+
+    assert len(prompts) == 2
+    excerpts = [len(p) - len(analyze.FRAGMENT_INSTRUCTION) if analyze.FRAGMENT_INSTRUCTION in p
+                else len(p) for p in prompts]
+    assert excerpts[1] < excerpts[0]
+
+
+def test_restart_comes_before_the_replacement_tokens(
+    client: TestClient, documents: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The clear signal arrives before the answer that replaces the old one."""
+    alternating(monkeypatch, [overflowing("bad answer"), fitting(QUOTED)])
+    order = names(upload(client, documents["utf8"]))
+    assert order.index("restart") < len(order) - 1
+    assert "token" in order[order.index("restart") :]
+
+
+def test_second_overflow_fails_loudly_instead_of_retrying_again(
+    client: TestClient, documents: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two overflows stop, rather than making the user wait for a third."""
+    prompts = alternating(monkeypatch, [overflowing("bad"), overflowing("also bad")])
+    response = upload(client, documents["utf8"])
+    order = names(response)
+
+    assert len(prompts) == 2
+    assert order.count("restart") == 1
+    assert order[-1] == "incomplete"
+    final = events(response)[-1]
+    assert final["reason"] == "context_overflow"
+    assert "Do not rely on this answer" in final["detail"]
+
+
+def test_no_retry_when_the_context_fits(
+    client: TestClient, documents: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A normal run makes one call and emits no restart."""
+    prompts = alternating(monkeypatch, [fitting(QUOTED)])
+    order = names(upload(client, documents["utf8"]))
+    assert len(prompts) == 1
+    assert "restart" not in order
+
+
+def test_coverage_is_reported_on_every_answer(
+    client: TestClient, documents: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Coverage arrives even when no quote failed."""
+    alternating(monkeypatch, [fitting(QUOTED)])
+    response = upload(client, documents["utf8"])
+    assert "coverage" in names(response)
+    coverage = next(e for e in events(response) if e["event"] == "coverage")
+    assert coverage["quoted"] >= 1
+
+
+def test_zero_coverage_is_reported_rather_than_passing_silently(
+    client: TestClient, documents: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A paraphrased answer reports no coverage and raises no warning.
+
+    Regression test. On a blank 1040 the model paraphrased every figure, so
+    verify_quotes had nothing to check and the answer displayed as clean.
+    """
+    alternating(monkeypatch, [fitting("Total income is the sum of lines 1z and 8.")])
+    response = upload(client, documents["utf8"])
+    coverage = next(e for e in events(response) if e["event"] == "coverage")
+    assert coverage["quoted"] == 0
+    assert coverage["figures"] > 0
+    assert "warning" not in names(response)
+
+
+def test_status_carries_a_wait_estimate_for_a_long_document(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A large document says roughly how long the first text will take."""
+    alternating(monkeypatch, [fitting(QUOTED)])
+    path = tmp_path / "long.txt"
+    path.write_text("The tenant shall pay rent on time. " * 3000)
+    response = client.post(
+        "/api/analyze", files={"file": (path.name, path.read_bytes())}
+    )
+    status = next(e for e in events(response) if e["event"] == "status")
+    assert "seconds" in status["message"]
+
+
+TAX_RETURN_TEXT = (
+    "U.S. Individual Income Tax Return, Form 1040. Filing status: single. "
+    "Adjusted gross income and taxable income are reported here. Federal "
+    "income tax withholding applies. Internal Revenue Service."
+)
+
+
+def test_tax_return_upload_is_flagged_unsupported(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Uploading a 1040 says so before any analysis text arrives.
+
+    The notice has to reach the reader with the same weight as the
+    truncation banner, so it rides on the same meta event.
+    """
+    alternating(monkeypatch, [fitting("An answer.")])
+    path = tmp_path / "return.txt"
+    path.write_text(TAX_RETURN_TEXT)
+    response = client.post(
+        "/api/analyze", files={"file": (path.name, path.read_bytes())}
+    )
+    meta = events(response)[0]
+    assert meta["document_type"] == "tax_return"
+    assert meta["unsupported_type"] is True
+
+
+def test_supported_upload_is_not_flagged_unsupported(
+    client: TestClient, documents: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An ordinary document carries no unsupported notice."""
+    alternating(monkeypatch, [fitting(QUOTED)])
+    meta = events(upload(client, documents["utf8"]))[0]
+    assert meta["unsupported_type"] is False

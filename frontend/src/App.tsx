@@ -1,6 +1,11 @@
 import { useEffect, useState } from "react";
 import { getHealth, streamAnalyze, streamCompare } from "./api.ts";
-import type { HealthResponse, IncompleteEvent, StreamEvent } from "./api.ts";
+import type {
+  CoverageEvent,
+  HealthResponse,
+  IncompleteEvent,
+  StreamEvent,
+} from "./api.ts";
 import UploadArea from "./components/UploadArea.tsx";
 import ResultsView from "./components/ResultsView.tsx";
 import QuestionBox from "./components/QuestionBox.tsx";
@@ -10,11 +15,16 @@ export interface RunState {
   documentIds: string[];
   documentType: string;
   truncated: boolean;
+  unsupportedType: boolean;
   stage: string;
   message: string;
   progress: string;
   answer: string;
   unverified: string[];
+  coverage: CoverageEvent | null;
+  // Set when the first attempt overflowed the context window and was thrown
+  // away. Kept after the retry finishes so the doubled wait is explained.
+  restarted: string;
   incomplete: IncompleteEvent | null;
   error: string;
   running: boolean;
@@ -24,11 +34,14 @@ const EMPTY_RUN: RunState = {
   documentIds: [],
   documentType: "",
   truncated: false,
+  unsupportedType: false,
   stage: "",
   message: "",
   progress: "",
   answer: "",
   unverified: [],
+  coverage: null,
+  restarted: "",
   incomplete: null,
   error: "",
   running: false,
@@ -56,6 +69,7 @@ export default function App() {
             documentIds: event.document_ids,
             documentType: event.document_type,
             truncated: event.truncated,
+            unsupportedType: event.unsupported_type,
           };
         case "status":
           return { ...current, stage: event.stage, message: event.message };
@@ -65,6 +79,19 @@ export default function App() {
             : { ...current, answer: current.answer + event.text };
         case "warning":
           return { ...current, unverified: event.unverified };
+        case "coverage":
+          return { ...current, coverage: event };
+        case "restart":
+          // The first attempt lost the front of the document, so everything
+          // streamed so far is discarded rather than appended to.
+          return {
+            ...current,
+            answer: "",
+            progress: "",
+            unverified: [],
+            coverage: null,
+            restarted: event.message,
+          };
         case "incomplete":
           return { ...current, incomplete: event, running: false };
         case "error":

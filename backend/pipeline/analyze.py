@@ -7,22 +7,27 @@ Work is produced as a stream of events rather than a finished string, so the
 interface can show text as it arrives. A first analysis takes about thirty
 seconds and a comparison about eighty, which is too long to show nothing.
 
-Two things shape how the prompts are built. The document always comes first,
-because Ollama caches the KV prefix and an unchanged document then costs
-almost nothing to re-send on a follow-up question. And every figure the model
-reports has to carry a quote, so verify_quotes can check it against the
-source once generation finishes.
+Three things shape how the prompts are built. The document always comes
+first, because Ollama caches the KV prefix and an unchanged document then
+costs almost nothing to re-send on a follow-up question. Every figure the
+model reports has to carry a quote, so verify_quotes can check it against the
+source once generation finishes. And the token counts that come back are
+checked against the context window, because Ollama drops the front of an
+oversized prompt silently and the model invents text to fill the gap.
 """
 
 import re
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
+from typing import NamedTuple
 
 import config
 from schemas import (
+    CoverageEvent,
     DoneEvent,
     ErrorEvent,
     IncompleteEvent,
     MetaEvent,
+    RestartEvent,
     StatusEvent,
     StreamEvent,
     TokenEvent,
@@ -31,10 +36,26 @@ from schemas import (
 
 from . import model
 
-# Measured on a sample document: 12960 characters came to 3559 tokens, about
-# 3.6 characters per token. Rounding down to 3.5 makes the estimate slightly
-# pessimistic, which is the safe direction for a budget.
-CHARS_PER_TOKEN: float = 3.5
+# Prose runs about 3.6 characters per token, but a dense form runs about
+# 2.9: a blank IRS 1040 with schedules came to 2.9, and the 3.5 that prose
+# suggested under-counted it by 20 percent. 2.8 is the pessimistic end of
+# what has been measured.
+#
+# This is only a first cut. Ollama has no tokenizer endpoint, so the real
+# size of a prompt is unknowable until it has been sent, and the guard that
+# matters is the overflow check on the counts that come back.
+CHARS_PER_TOKEN: float = 2.8
+
+# Tokens set aside for the system prompt, which is not part of the document
+# budget but does count against the context window.
+SYSTEM_RESERVE_TOKENS: int = 400
+
+# Measured prompt evaluation rate on an M1 Pro, used only to tell the user
+# roughly how long a large document will take before the first token.
+PROMPT_EVAL_TOKENS_PER_SECOND: int = 166
+
+# Below this, the wait is short enough that an estimate is noise.
+ESTIMATE_THRESHOLD_TOKENS: int = 2000
 
 # How many distinct keywords a type needs before it beats the generic
 # checklist.
@@ -53,6 +74,8 @@ ANALYSIS_SYSTEM_PROMPT: str = (
     "Never infer, estimate, or fill in a number that is not written there. "
     "Every figure, date, name, and deadline you report must be followed by a "
     "short quote of the exact wording from the document, in double quotes. "
+    "This applies to forms and tables too: quote the line label and its "
+    "wording rather than describing it in your own words. "
     "If the document does not say something, write 'not stated in the "
     "document' instead of guessing."
 )
@@ -65,6 +88,17 @@ COMPARISON_SYSTEM_PROMPT: str = (
     "Use only what is in the two summaries. "
     "Keep the quotes that the summaries give you when you report a figure. "
     "If a point is missing from one summary, say so rather than guessing."
+)
+
+# Added to the prompt when the document did not fit. The banner tells the
+# user the text was cut, but the model still described the whole document
+# from the fragment it saw, listing two schedules out of eight as though
+# that were the full contents.
+FRAGMENT_INSTRUCTION: str = (
+    "Important: you are seeing only the beginning of a longer document. The "
+    "rest was cut off and you cannot see it. Scope every statement to what "
+    "is shown above. Do not describe what the document contains as a whole, "
+    "and do not present a list of its sections or attachments as complete."
 )
 
 LENGTH_DETAIL: str = (
@@ -81,6 +115,25 @@ INTERRUPTED_DETAIL: str = (
 EMPTY_ANSWER_DETAIL: str = (
     "The local model returned an empty answer. If thinking has been turned "
     "on, the reasoning may have used the whole token budget."
+)
+
+OVERFLOW_DETAIL: str = (
+    "This document does not fit in the model's context window, even after a "
+    "second attempt with a shorter excerpt. The model was working from a "
+    "silently cut down view of it and may have invented the parts it could "
+    "not see. Do not rely on this answer."
+)
+
+RESTART_MESSAGE: str = (
+    "That attempt used more context than the model can hold, so the start "
+    "of the document was dropped and the answer could not be trusted. "
+    "Starting again with a shorter excerpt. This doubles the wait."
+)
+
+RETRY_NOTE: str = (
+    "The first attempt overflowed the model's context window and was "
+    "discarded. This answer is the second attempt, made from a shorter "
+    "excerpt of the document."
 )
 
 CHECKLISTS: dict[str, tuple[str, ...]] = {
@@ -100,14 +153,6 @@ CHECKLISTS: dict[str, tuple[str, ...]] = {
         "What the tenant pays beyond rent, utilities and maintenance",
         "Restrictions on pets, guests, or subletting",
     ),
-    "tax_return": (
-        "Tax year and filing status",
-        "Total income and adjusted gross income",
-        "Taxable income and total tax",
-        "Withholding and any payments already made",
-        "Refund due or balance owed",
-        "Notable credits, deductions, or attached schedules",
-    ),
     "generic": (
         "What kind of document this is, and who the parties are",
         "Every amount of money, and what each one is for",
@@ -116,6 +161,13 @@ CHECKLISTS: dict[str, tuple[str, ...]] = {
         "Anything unusual, one sided, or easy to miss",
     ),
 }
+
+# Document kinds this tool recognizes but does not handle well. Detection is
+# kept deliberately: dropping the claim from the documentation does not stop
+# anyone uploading a 1040, and quietly doing a poor job of it is the failure
+# this project has spent its whole history designing against. A recognized
+# but unsupported document gets the generic checklist and a plain notice.
+UNSUPPORTED_TYPES: frozenset[str] = frozenset({"tax_return"})
 
 TYPE_KEYWORDS: dict[str, tuple[str, ...]] = {
     "job_offer": (
@@ -155,10 +207,33 @@ CURLY_DOUBLE_QUOTES: dict[int, str] = {0x201C: '"', 0x201D: '"'}
 
 QUOTE_PATTERN = re.compile(r'"([^"]{4,})"')
 
+# Markdown list markers are stripped before counting figures, so bullet
+# numbering is not mistaken for a figure the model reported.
+LIST_MARKER_PATTERN = re.compile(r"(?m)^\s*(?:[-*]|\d+[.)])\s+")
+
+# A number, with optional thousands separators, decimals, and a trailing
+# letter for form line labels such as 1z or 11b.
+FIGURE_PATTERN = re.compile(r"\b\d[\d,]*(?:\.\d+)?[a-z]?\b")
+
+# Everything that is not a word character or a space, dropped before a quote
+# is matched against its source. See normalize_for_matching.
+PUNCTUATION_PATTERN = re.compile(r"[^a-z0-9 ]+")
+
 # The phrase the system prompt tells the model to use for a point the
 # document does not cover. The model often puts it in quotes, which makes it
 # look like a quotation from the document that cannot be found there.
 NOT_STATED_PREFIX: str = "not stated"
+
+
+class Coverage(NamedTuple):
+    """How many of the figures in an answer carried a supporting quote.
+
+    Approximate on purpose. The figure count comes from a regular expression
+    over the answer, which cannot tell a salary from a form line label.
+    """
+
+    figures: int
+    quoted: int
 
 
 class StageResult:
@@ -172,9 +247,23 @@ class StageResult:
 
     def __init__(self) -> None:
         self.text: str = ""
+        self.source: str = ""
         self.cut_off: bool = False
         self.interrupted: bool = False
         self.failure: str | None = None
+        self.prompt_tokens: int = 0
+        self.eval_tokens: int = 0
+        self.retried: bool = False
+        self.overflowed: bool = False
+
+    def reset_output(self) -> None:
+        """Clear what one attempt produced, keeping the retry bookkeeping."""
+        self.text = ""
+        self.cut_off = False
+        self.interrupted = False
+        self.failure = None
+        self.prompt_tokens = 0
+        self.eval_tokens = 0
 
 
 def estimate_tokens(text: str) -> int:
@@ -201,6 +290,11 @@ def detect_document_type(text: str) -> str:
     return best_type
 
 
+def is_unsupported(document_type: str) -> bool:
+    """Report whether this kind of document is out of scope."""
+    return document_type in UNSUPPORTED_TYPES
+
+
 def truncate_to_budget(text: str, max_tokens: int) -> tuple[str, bool]:
     """Cut text down to a token budget, reporting whether anything was cut."""
     if estimate_tokens(text) <= max_tokens:
@@ -209,14 +303,88 @@ def truncate_to_budget(text: str, max_tokens: int) -> tuple[str, bool]:
     return text[:limit].rstrip(), True
 
 
+def context_overflowed(result: StageResult) -> bool:
+    """Report whether the model lost part of its prompt to the window.
+
+    Two ways it happens, both silent. If the prompt alone is larger than the
+    window, Ollama pins prompt_eval_count to num_ctx and discards the front.
+    If the prompt fits but prompt plus output crosses the window, the context
+    shifts during generation and the front is evicted mid answer. Measured on
+    qwen3:8b, both leave done_reason as "stop" and the model fabricates
+    whatever it can no longer see.
+    """
+    if result.prompt_tokens <= 0:
+        return False
+    if result.prompt_tokens >= config.OLLAMA_NUM_CTX:
+        return True
+    return result.prompt_tokens + result.eval_tokens > config.OLLAMA_NUM_CTX
+
+
+def measured_budget_chars(sent_chars: int, prompt_tokens: int) -> int:
+    """Work out how many prompt characters fit, from what a call really used.
+
+    This replaces the estimate with a measurement. The ratio comes from the
+    attempt that just overflowed, so it is correct for this document rather
+    than for documents in general.
+    """
+    if prompt_tokens <= 0:
+        return sent_chars
+    ratio = sent_chars / prompt_tokens
+    allowed = (
+        config.OLLAMA_NUM_CTX - config.OLLAMA_NUM_PREDICT - SYSTEM_RESERVE_TOKENS
+    )
+    return max(1, int(allowed * ratio))
+
+
+def describe_wait(text: str) -> str:
+    """Say how long the first text will take, when the wait is long enough.
+
+    Prompt evaluation happens before any token can be produced, so on a large
+    document the stream shows nothing for most of a minute. The estimate is
+    rough by construction and is worded that way.
+    """
+    tokens = estimate_tokens(text)
+    if tokens < ESTIMATE_THRESHOLD_TOKENS:
+        return "Reading the document"
+    seconds = round(tokens / PROMPT_EVAL_TOKENS_PER_SECOND / 5) * 5
+    return (
+        f"Reading a long document, roughly {tokens:,} tokens. "
+        f"The first text should appear in about {seconds} seconds"
+    )
+
+
 def straighten_quotes(text: str) -> str:
     """Replace typographic double quotes with straight ones."""
     return text.translate(CURLY_DOUBLE_QUOTES)
 
 
 def normalize_for_matching(text: str) -> str:
-    """Flatten whitespace and case so a quote can be found in the source."""
-    return re.sub(r"\s+", " ", text).strip().lower()
+    """Reduce text to what a quote and its source must share to be the same.
+
+    Case, whitespace, and punctuation are all removed, which leaves words and
+    figures. Those are what a quote is actually claiming; the rest is layout.
+
+    Punctuation removal is what handles the dot leaders on a form line, as in
+    "Add lines 16 and 17 . . . . . . 18". They sit between a label and its
+    answer box, carry no meaning, and are not reproduced when the model
+    quotes the line, so a substantively verbatim quote failed to match.
+
+    A formatting difference is not a fabrication. Treating it as one produces
+    warnings that teach people to ignore warnings, which costs more than the
+    warning was ever worth.
+    """
+    text = straighten_quotes(text).lower()
+    text = PUNCTUATION_PATTERN.sub(" ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def real_quotes(answer: str) -> list[str]:
+    """Quoted spans in an answer, excluding the not-stated marker."""
+    return [
+        quote
+        for quote in QUOTE_PATTERN.findall(straighten_quotes(answer))
+        if not normalize_for_matching(quote).startswith(NOT_STATED_PREFIX)
+    ]
 
 
 def verify_quotes(answer: str, source: str) -> list[str]:
@@ -232,13 +400,26 @@ def verify_quotes(answer: str, source: str) -> list[str]:
     """
     haystack = normalize_for_matching(source)
     unverified: list[str] = []
-    for quote in QUOTE_PATTERN.findall(straighten_quotes(answer)):
+    for quote in real_quotes(answer):
         needle = normalize_for_matching(quote)
-        if not needle or needle.startswith(NOT_STATED_PREFIX):
-            continue
-        if needle not in haystack:
+        if needle and needle not in haystack:
             unverified.append(quote.strip())
     return unverified
+
+
+def measure_coverage(answer: str) -> Coverage:
+    """Count figures in an answer and how many sit inside a quote.
+
+    Reported on every answer, not only when a quote fails. On a dense form
+    the model paraphrases instead of quoting, which produces an answer with
+    no quotes at all: verify_quotes passes because it has nothing to check,
+    and that reads on screen exactly like a fully verified answer.
+    """
+    quoted_blob = " ".join(real_quotes(answer))
+    body = LIST_MARKER_PATTERN.sub("", straighten_quotes(answer))
+    figures = set(FIGURE_PATTERN.findall(body))
+    quoted = {figure for figure in figures if figure in quoted_blob}
+    return Coverage(figures=len(figures), quoted=len(quoted))
 
 
 def format_checklist(document_type: str) -> str:
@@ -247,20 +428,29 @@ def format_checklist(document_type: str) -> str:
     return "\n".join(f"- {item}" for item in items)
 
 
-def build_analysis_prompt(text: str, document_type: str) -> str:
+def fragment_note(truncated: bool) -> str:
+    """The scoping instruction, when the model is seeing only a fragment."""
+    return f"\n\n{FRAGMENT_INSTRUCTION}" if truncated else ""
+
+
+def build_analysis_prompt(
+    text: str, document_type: str, truncated: bool = False
+) -> str:
     """Build the analysis prompt, document first so the prefix caches."""
     return (
-        f"Document:\n{text}\n\n"
+        f"Document:\n{text}{fragment_note(truncated)}\n\n"
         "Explain this document in plain language. Cover each of these "
         "points, and write 'not stated in the document' for any the "
         f"document does not answer:\n{format_checklist(document_type)}"
     )
 
 
-def build_digest_prompt(text: str, document_type: str) -> str:
+def build_digest_prompt(
+    text: str, document_type: str, truncated: bool = False
+) -> str:
     """Build the prompt that reduces one document to its key fields."""
     return (
-        f"Document:\n{text}\n\n"
+        f"Document:\n{text}{fragment_note(truncated)}\n\n"
         "Give one short line for each point below, in the order listed. "
         "Put the figure first, then the exact quote from the document that "
         "supports it. Write 'not stated in the document' for any point the "
@@ -280,7 +470,10 @@ def build_comparison_prompt(first_digest: str, second_digest: str) -> str:
 
 
 def build_question_prompt(
-    text: str, question: str, history: Sequence[tuple[str, str]]
+    text: str,
+    question: str,
+    history: Sequence[tuple[str, str]],
+    truncated: bool = False,
 ) -> str:
     """Build a follow-up prompt: document, then history, then the question.
 
@@ -288,7 +481,7 @@ def build_question_prompt(
     Ollama's prompt cache covers it. Measured, that turns a 19 second prompt
     evaluation into 0.05 seconds on the second question.
     """
-    parts = [f"Document:\n{text}"]
+    parts = [f"Document:\n{text}{fragment_note(truncated)}"]
     for asked, answered in history:
         parts.append(f"Earlier question: {asked}\nEarlier answer: {answered}")
     parts.append(f"Question: {question}")
@@ -310,6 +503,9 @@ def stream_stage(
                 yield TokenEvent(stage=stage, text=chunk.text)
             if chunk.done_reason == "length":
                 result.cut_off = True
+            if chunk.prompt_tokens:
+                result.prompt_tokens = chunk.prompt_tokens
+                result.eval_tokens = chunk.eval_tokens
     except model.ModelError as problem:
         if result.text:
             result.interrupted = True
@@ -317,7 +513,46 @@ def stream_stage(
             result.failure = str(problem)
 
 
-def finish(result: StageResult, source: str) -> Iterator[StreamEvent]:
+def stream_generation(
+    document: str,
+    build_prompt: Callable[[str, bool], str],
+    system: str,
+    stage: str,
+    result: StageResult,
+) -> Iterator[StreamEvent]:
+    """Stream one generation, retrying once from a shorter excerpt on overflow.
+
+    Retried at most once. If the second attempt also overflows the window it
+    is reported rather than retried again, because a third attempt would only
+    make the user wait longer for an answer that still cannot be trusted.
+    """
+    trimmed, truncated = truncate_to_budget(document, config.DOCUMENT_TOKEN_BUDGET)
+    result.source = trimmed
+    yield from stream_stage(build_prompt(trimmed, truncated), system, stage, result)
+
+    if result.failure is not None or result.interrupted:
+        return
+    if not context_overflowed(result):
+        return
+
+    # Size the second attempt from what the first one actually used, rather
+    # than from the estimate that just proved wrong.
+    prompt = build_prompt(trimmed, truncated)
+    overhead = len(prompt) - len(trimmed)
+    allowed = measured_budget_chars(len(prompt), result.prompt_tokens) - overhead
+    shorter = document[: max(1, allowed)].rstrip()
+
+    yield RestartEvent(reason="context_overflow", message=RESTART_MESSAGE)
+    result.reset_output()
+    result.retried = True
+    result.source = shorter
+    yield from stream_stage(build_prompt(shorter, True), system, stage, result)
+
+    if result.failure is None and not result.interrupted:
+        result.overflowed = context_overflowed(result)
+
+
+def finish(result: StageResult) -> Iterator[StreamEvent]:
     """Emit the closing events for a finished stage.
 
     Exactly one terminal event is produced: error, incomplete, or done. The
@@ -334,10 +569,16 @@ def finish(result: StageResult, source: str) -> Iterator[StreamEvent]:
         yield ErrorEvent(detail=EMPTY_ANSWER_DETAIL)
         return
 
-    unverified = verify_quotes(result.text, source)
+    unverified = verify_quotes(result.text, result.source)
     if unverified:
         yield WarningEvent(unverified=unverified)
 
+    coverage = measure_coverage(result.text)
+    yield CoverageEvent(figures=coverage.figures, quoted=coverage.quoted)
+
+    if result.overflowed:
+        yield IncompleteEvent(reason="context_overflow", detail=OVERFLOW_DETAIL)
+        return
     if result.cut_off:
         yield IncompleteEvent(reason="length", detail=LENGTH_DETAIL)
         return
@@ -353,17 +594,19 @@ def stream_analysis(text: str, document_ids: list[str]) -> Iterator[StreamEvent]
         document_ids=document_ids,
         document_type=document_type,
         truncated=truncated,
+        unsupported_type=is_unsupported(document_type),
     )
-    yield StatusEvent(stage=STAGE_ANALYZING, message="Reading the document")
+    yield StatusEvent(stage=STAGE_ANALYZING, message=describe_wait(trimmed))
 
     result = StageResult()
-    yield from stream_stage(
-        build_analysis_prompt(trimmed, document_type),
+    yield from stream_generation(
+        text,
+        lambda body, cut: build_analysis_prompt(body, document_type, cut),
         ANALYSIS_SYSTEM_PROMPT,
         STAGE_ANALYZING,
         result,
     )
-    yield from finish(result, trimmed)
+    yield from finish(result)
 
 
 def stream_comparison(
@@ -381,24 +624,30 @@ def stream_comparison(
     """
     document_type = detect_document_type(f"{first_text}\n{second_text}")
     budget = config.DOCUMENT_TOKEN_BUDGET
-    first_trimmed, first_cut = truncate_to_budget(first_text, budget)
-    second_trimmed, second_cut = truncate_to_budget(second_text, budget)
+    _, first_cut = truncate_to_budget(first_text, budget)
+    _, second_cut = truncate_to_budget(second_text, budget)
 
     yield MetaEvent(
         document_ids=document_ids,
         document_type=document_type,
         truncated=first_cut or second_cut,
+        unsupported_type=is_unsupported(document_type),
     )
 
     digests: list[str] = []
-    for text, stage, message in (
-        (first_trimmed, STAGE_READING_FIRST, "Reading the first document"),
-        (second_trimmed, STAGE_READING_SECOND, "Reading the second document"),
+    sources: list[str] = []
+    for text, stage, label in (
+        (first_text, STAGE_READING_FIRST, "first"),
+        (second_text, STAGE_READING_SECOND, "second"),
     ):
-        yield StatusEvent(stage=stage, message=message)
+        trimmed, _ = truncate_to_budget(text, budget)
+        yield StatusEvent(
+            stage=stage, message=f"Reading the {label} document. {describe_wait(trimmed)}"
+        )
         result = StageResult()
-        yield from stream_stage(
-            build_digest_prompt(text, document_type),
+        yield from stream_generation(
+            text,
+            lambda body, cut: build_digest_prompt(body, document_type, cut),
             ANALYSIS_SYSTEM_PROMPT,
             stage,
             result,
@@ -409,17 +658,22 @@ def stream_comparison(
         if result.interrupted:
             yield IncompleteEvent(reason="interrupted", detail=INTERRUPTED_DETAIL)
             return
+        if result.overflowed:
+            yield IncompleteEvent(reason="context_overflow", detail=OVERFLOW_DETAIL)
+            return
         digests.append(result.text)
+        sources.append(result.source)
 
     yield StatusEvent(stage=STAGE_COMPARING, message="Comparing the two")
     result = StageResult()
+    result.source = "\n".join(sources)
     yield from stream_stage(
         build_comparison_prompt(digests[0], digests[1]),
         COMPARISON_SYSTEM_PROMPT,
         STAGE_COMPARING,
         result,
     )
-    yield from finish(result, f"{first_trimmed}\n{second_trimmed}")
+    yield from finish(result)
 
 
 def stream_answer(
@@ -427,13 +681,14 @@ def stream_answer(
 ) -> Iterator[StreamEvent]:
     """Answer a follow-up question about a document, streaming the answer."""
     trimmed, _ = truncate_to_budget(text, config.DOCUMENT_TOKEN_BUDGET)
-    yield StatusEvent(stage=STAGE_ANSWERING, message="Looking it up")
+    yield StatusEvent(stage=STAGE_ANSWERING, message=describe_wait(trimmed))
 
     result = StageResult()
-    yield from stream_stage(
-        build_question_prompt(trimmed, question, history),
+    yield from stream_generation(
+        text,
+        lambda body, cut: build_question_prompt(body, question, history, cut),
         ANALYSIS_SYSTEM_PROMPT,
         STAGE_ANSWERING,
         result,
     )
-    yield from finish(result, trimmed)
+    yield from finish(result)

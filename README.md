@@ -1,9 +1,9 @@
 # AnalyzeLocal
 
-AnalyzeLocal analyzes sensitive personal documents like job offers, leases, and
-tax returns entirely on your own machine. You never upload your documents to a
-cloud AI service like ChatGPT or Claude. Every step runs locally, so your
-documents never leave your computer.
+AnalyzeLocal analyzes sensitive personal documents like job offers and leases
+entirely on your own machine. You never upload your documents to a cloud AI
+service like ChatGPT or Claude. Every step runs locally, so your documents
+never leave your computer.
 
 It reads the document and produces a plain-language analysis and comparison,
 all on-device.
@@ -18,6 +18,29 @@ all on-device.
 Because everything runs on your own machine, nothing is stripped out of the
 document before analysis. The model sees the salary figures, the dates, and the
 names, which is what makes the analysis useful.
+
+## What it supports
+
+AnalyzeLocal is built for short documents that are mostly prose.
+
+- Job offers and leases work well. They fit in the model's context window
+  whole, and the analysis quotes the document for every figure it reports.
+- Other short documents, such as contracts, letters, and agreements, get a
+  general checklist rather than a tailored one and otherwise work the same.
+- Long documents are cut to fit. Anything past roughly 18,000 characters,
+  about 3,000 words, is truncated. Only the first part is read, and the app
+  says so on screen. Figures later in the document are not seen.
+- Tax returns are not supported. A blank 1040 with its common schedules comes
+  to about 54,000 characters, three times what fits, so most of it never
+  reaches the model. The app recognizes a tax return and tells you it is
+  unsupported rather than producing an analysis that looks complete. Handling
+  them properly needs the document split into chunks and summarized in passes,
+  which is not built.
+
+Every figure the analysis reports is checked back against your document, and
+anything it could not find is flagged. The app also reports how much of the
+answer it was able to check, because an answer with nothing to check looks the
+same as a verified one.
 
 ## Requirements
 

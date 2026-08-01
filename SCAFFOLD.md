@@ -4,6 +4,9 @@ Build plan for the repo. Use this together with CLAUDE.md. The pipeline is two
 steps, extract then analyze. Redaction was considered and deliberately cut, for
 the reasons recorded in CLAUDE.md.
 
+Scope is job offers, leases, and other short documents that are mostly prose.
+Tax returns are recognized but out of scope, also recorded in CLAUDE.md.
+
 ## Target structure
 
 backend/                Python, FastAPI
@@ -158,3 +161,18 @@ FastAPI and the browser.
 
 Each step lands with tests. A bug that gets fixed gets a test that fails
 without the fix, so the same mistake cannot come back quietly.
+
+## Known gaps
+
+Not a roadmap. These are things the tool does not do, recorded so nobody has
+to rediscover them.
+
+- No chunking. A document larger than the context window is truncated to its
+  first part and the interface says so. Splitting a long document into pieces,
+  summarizing each, and reasoning over the summaries is what would remove the
+  limit. Until that exists, long documents are partially read and tax returns
+  are out of scope.
+- The figure count behind the coverage report comes from a regular
+  expression, so it is approximate and is presented that way.
+- Comparison holds both documents in memory and makes three model calls, so
+  it takes about three times as long as a single analysis.

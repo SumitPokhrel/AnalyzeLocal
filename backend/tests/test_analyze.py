@@ -71,9 +71,49 @@ def test_detects_a_lease() -> None:
     assert analyze.detect_document_type(LEASE) == "lease"
 
 
-def test_detects_a_tax_return() -> None:
-    """A tax return scores against the tax return keywords."""
+def test_still_detects_a_tax_return() -> None:
+    """Detection is kept even though the type is out of scope.
+
+    Dropping the claim from the documentation does not stop anyone uploading
+    a 1040. Recognizing it is what lets the app say it is unsupported instead
+    of quietly doing a poor job.
+    """
     assert analyze.detect_document_type(TAX_RETURN) == "tax_return"
+
+
+def test_tax_return_is_marked_unsupported() -> None:
+    """A recognized tax return is flagged as out of scope."""
+    assert analyze.is_unsupported("tax_return") is True
+
+
+def test_supported_types_are_not_marked_unsupported() -> None:
+    """Job offers, leases, and generic documents are in scope."""
+    for name in ("job_offer", "lease", "generic"):
+        assert analyze.is_unsupported(name) is False
+
+
+def test_tax_return_gets_the_generic_checklist() -> None:
+    """An unsupported type falls back rather than keeping a tailored list.
+
+    The tax return checklist was removed with the claim to handle them, so
+    format_checklist falls through to generic. That fallback is the routing.
+    """
+    assert "tax_return" not in analyze.CHECKLISTS
+    assert analyze.format_checklist("tax_return") == analyze.format_checklist("generic")
+
+
+def test_tax_return_prompt_has_no_tax_specific_points() -> None:
+    """The prompt for a 1040 asks the generic questions, not tax ones.
+
+    Asserts on the checklist lines rather than on the whole prompt, because
+    the prompt embeds the document and a tax return says "adjusted gross
+    income" in its own text.
+    """
+    prompt = analyze.build_analysis_prompt(TAX_RETURN, "tax_return")
+    assert "Tax year and filing status" not in prompt
+    assert "Total income and adjusted gross income" not in prompt
+    assert "Refund due or balance owed" not in prompt
+    assert "What kind of document this is" in prompt
 
 
 def test_unrecognized_document_falls_back_to_generic() -> None:
@@ -235,3 +275,178 @@ def test_question_without_history_omits_the_earlier_section(
     """A first question carries no history block."""
     list(analyze.stream_answer(OFFER, "What is the salary?"))
     assert "Earlier question:" not in recorder.prompts[0]
+
+
+def test_overflow_detected_when_the_prompt_is_pinned_to_the_window() -> None:
+    """A prompt at exactly num_ctx means Ollama discarded its front.
+
+    Regression test. Measured on qwen3:8b: a prompt larger than num_ctx comes
+    back with prompt_eval_count pinned to num_ctx, done_reason still "stop",
+    and a sentinel placed at the front of the prompt is gone. The model
+    invented a replacement for it rather than saying it could not see one.
+    """
+    result = analyze.StageResult()
+    result.prompt_tokens = config.OLLAMA_NUM_CTX
+    result.eval_tokens = 10
+    assert analyze.context_overflowed(result) is True
+
+
+def test_overflow_detected_when_generation_crosses_the_window() -> None:
+    """A prompt that fits can still evict the front while generating.
+
+    Regression test. This is what happened to the 1040: prompt 7965 fit
+    inside 8192, but 7965 plus 370 generated tokens crossed it, so the front
+    of the document was evicted partway through the answer.
+    """
+    result = analyze.StageResult()
+    result.prompt_tokens = config.OLLAMA_NUM_CTX - 200
+    result.eval_tokens = 400
+    assert analyze.context_overflowed(result) is True
+
+
+def test_no_overflow_when_everything_fits() -> None:
+    """A prompt and answer inside the window is not flagged."""
+    result = analyze.StageResult()
+    result.prompt_tokens = 1000
+    result.eval_tokens = 200
+    assert analyze.context_overflowed(result) is False
+
+
+def test_no_overflow_claimed_without_counts() -> None:
+    """A stage with no reported counts is not treated as an overflow."""
+    assert analyze.context_overflowed(analyze.StageResult()) is False
+
+
+def test_measured_budget_uses_the_real_ratio_not_the_estimate() -> None:
+    """The retry is sized from what the failed attempt actually used."""
+    # 20000 characters measured at 10000 tokens is 2.0 chars per token.
+    allowed = (
+        config.OLLAMA_NUM_CTX - config.OLLAMA_NUM_PREDICT - analyze.SYSTEM_RESERVE_TOKENS
+    )
+    assert analyze.measured_budget_chars(20000, 10000) == allowed * 2
+
+
+def test_coverage_counts_quoted_figures() -> None:
+    """Figures sitting inside a quote are counted as covered."""
+    answer = 'Base salary "Your base salary will be 168000 USD per year".'
+    coverage = analyze.measure_coverage(answer)
+    assert coverage.figures == 1
+    assert coverage.quoted == 1
+
+
+def test_coverage_reports_zero_when_nothing_is_quoted() -> None:
+    """A paraphrased answer reports no coverage rather than passing silently.
+
+    Regression test. On a blank IRS 1040 the model paraphrased every line
+    reference instead of quoting, so verify_quotes had nothing to check and
+    returned clean. Zero coverage and full verification looked identical.
+    """
+    answer = "Total income is the sum of lines 1z, 2b, and 8."
+    coverage = analyze.measure_coverage(answer)
+    assert coverage.figures > 0
+    assert coverage.quoted == 0
+
+
+def test_coverage_ignores_markdown_list_numbering() -> None:
+    """Bullet numbering is not counted as a figure the model reported."""
+    answer = "1. First point\n2. Second point\n3. Third point"
+    assert analyze.measure_coverage(answer).figures == 0
+
+
+def test_coverage_ignores_the_not_stated_marker() -> None:
+    """The not-stated phrase does not count as a supporting quote."""
+    answer = 'Refund: "not stated in the document". Tax year is 2025.'
+    coverage = analyze.measure_coverage(answer)
+    assert coverage.quoted == 0
+
+
+def test_fragment_instruction_added_only_when_truncated() -> None:
+    """A truncated document tells the model it is seeing a fragment.
+
+    Regression test. With only the banner, the model described the whole
+    document from the part it saw, listing two schedules of a 1040 that has
+    eight as though that were the complete set.
+    """
+    cut = analyze.build_analysis_prompt("text", "lease", truncated=True)
+    whole = analyze.build_analysis_prompt("text", "lease", truncated=False)
+    assert analyze.FRAGMENT_INSTRUCTION in cut
+    assert analyze.FRAGMENT_INSTRUCTION not in whole
+
+
+def test_fragment_instruction_reaches_digest_and_question_prompts() -> None:
+    """Scoping applies wherever a truncated document is sent."""
+    assert analyze.FRAGMENT_INSTRUCTION in analyze.build_digest_prompt(
+        "text", "lease", truncated=True
+    )
+    assert analyze.FRAGMENT_INSTRUCTION in analyze.build_question_prompt(
+        "text", "How much?", (), truncated=True
+    )
+
+
+def test_wait_estimate_only_appears_for_a_long_document() -> None:
+    """A short document gets no estimate, a long one gets seconds."""
+    assert analyze.describe_wait("short text") == "Reading the document"
+    long_message = analyze.describe_wait("word " * 20000)
+    assert "seconds" in long_message
+    assert "tokens" in long_message
+
+
+# The dot leaders on a form line, exactly as pypdf extracts them from a 1040.
+FORM_LINE = (
+    "9 Add lines 1z, 2b, 3b, 4b, 5b, 6b, 7a, and 8. This is your total "
+    "income . . . . . . . . . . . 9\n"
+    "10 Adjustments to income from Schedule 1, line 26 . . . . . . . . . 10"
+)
+
+
+def test_dot_leaders_do_not_break_a_verbatim_quote() -> None:
+    """A form line quoted without its leaders still matches the document.
+
+    Regression test. A blank IRS 1040 extracts as "This is your total income
+    . . . . . . 9". The model quotes the line without the leaders and with a
+    closing period, so the contiguous match failed and seven of eight
+    warnings on that document were formatting artifacts.
+    """
+    quote = (
+        '"9 Add lines 1z, 2b, 3b, 4b, 5b, 6b, 7a, and 8. '
+        'This is your total income."'
+    )
+    assert analyze.verify_quotes(quote, FORM_LINE) == []
+
+
+def test_punctuation_differences_do_not_break_a_quote() -> None:
+    """A quote differing only in punctuation is substantively verbatim."""
+    source = "Subtract line 14 from line 11b. If zero or less, enter -0-."
+    quote = '"Subtract line 14 from line 11b: if zero or less enter -0-"'
+    assert analyze.verify_quotes(quote, source) == []
+
+
+def test_dropping_words_is_still_flagged() -> None:
+    """Loosening punctuation does not excuse a quote that omits wording."""
+    source = "Subtract line 14 from line 11b. If zero or less, enter -0-."
+    quote = '"Subtract line 14 from line 11b, enter -0-"'
+    assert analyze.verify_quotes(quote, source) != []
+
+
+def test_absent_wording_is_still_flagged_after_leader_handling() -> None:
+    """A phrase that is nowhere in the document still fails the check.
+
+    Regression test. On the 1040 the model wrote "18 Add lines 16 and 17.
+    This is your total tax." The line label is real, but "this is your total
+    tax" appears nowhere in the document: the model merged a real label with
+    an invented descriptor. Loosening the match for dot leaders must not
+    let that through.
+    """
+    source = "18 Add lines 16 and 17 . . . . . . . . . . . . . . . . 18"
+    flagged = analyze.verify_quotes(
+        '"18 Add lines 16 and 17. This is your total tax."', source
+    )
+    assert flagged == ["18 Add lines 16 and 17. This is your total tax."]
+
+
+def test_fabricated_figure_still_flagged_after_leader_handling() -> None:
+    """Loosening formatting does not loosen the figures themselves."""
+    answer = 'Salary is "Your base salary will be 999999 USD".'
+    assert analyze.verify_quotes(answer, OFFER) == [
+        "Your base salary will be 999999 USD"
+    ]

@@ -5,7 +5,8 @@ Project instructions for Claude Code. Read this before making changes.
 ## What this project is
 
 AnalyzeLocal is an open-source desktop tool that analyzes sensitive personal
-documents (job offers, leases, tax returns) entirely on the user's machine.
+documents (job offers, leases, and other short documents) entirely on the
+user's machine.
 The whole point is privacy: you never upload your documents to a cloud AI
 service like ChatGPT or Claude. Everything stays on your laptop, and no
 document, and no data derived from a document, ever leaves the computer. It
@@ -58,6 +59,59 @@ action, for the case where someone wants to paste a sanitized version into a
 cloud model for a second opinion. That is a real workflow and the reason the
 door is left open. It is not part of the core pipeline, and it should not be
 reintroduced as one.
+
+## On tax returns (deliberately out of scope)
+
+An earlier version of this listed tax returns alongside job offers and leases.
+That claim is withdrawn. A blank 1040 with its common schedules extracts to
+about 54,000 characters, roughly three times what fits in the context window,
+so most of it is dropped before the model sees anything. The schedules that
+carry the interesting figures, capital gains, business income, and rental
+income, sit at the end and are the first to go.
+
+Detection stays, and must not be removed. Someone will upload a 1040 whatever
+the documentation says, and the app tells them it is unsupported rather than
+producing a confident analysis of the first 40 percent. Recognizing a document
+and quietly doing a poor job of it is the failure mode this project keeps
+designing against.
+
+What would change this is chunking: splitting a long document into pieces,
+summarizing each, then reasoning over the summaries. That is not built. Until
+it is, tax returns stay out of scope.
+
+## On the quote check (standing rule, both halves)
+
+The analysis has to quote the document for every figure it reports, and
+verify_quotes checks each quote back against the source. When a quote fails
+that check, there are two opposite explanations, and telling them apart is
+the whole job. Getting it backwards breaks the tool in one direction or the
+other.
+
+A normalization gap that makes a substantively verbatim quote fail to match
+is a bug in the checker, not a finding. This has already happened three times
+from different directions: collapsed whitespace, typographic quotes, and the
+dot leaders on a form line. In each case the quote said what the document
+says and a layout difference defeated the string match. Fix the matcher.
+False warnings are expensive because they teach people to ignore warnings,
+and a warning nobody reads protects nobody.
+
+Quote stitching is the opposite case and must not be treated the same way.
+When the model joins two passages that are each verbatim but sit apart in the
+document, the combined quote is a false claim: presenting them as one
+quotation asserts that the text between them does not exist. The flag is
+correct. Loosening the matcher to let stitched quotes through would make the
+checker endorse a claim the document does not support, which is worse than
+the false positives the first half is about.
+
+The test that separates them: is the quote verbatim as one contiguous span,
+ignoring layout? A formatting difference does not change what the document
+says. Omitted text does.
+
+Status as of the last measured run: stitching is watch-only. One occurrence,
+on an offer letter, where the two halves sat 96 characters apart with an
+unrelated sentence between them. That is not enough to act on. If it becomes
+common, the fix is a prompt clause requiring quotes to be contiguous, or
+split into separate quotations. The fix is never a looser match.
 
 ## Model runtime
 

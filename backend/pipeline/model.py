@@ -32,10 +32,16 @@ class ModelChunk(NamedTuple):
 
     done_reason is set only on the final chunk. Ollama reports "stop" for a
     normal finish and "length" when the num_predict cap was reached.
+
+    The token counts also arrive only on the final chunk. They are the only
+    honest measure of how much context was used: Ollama has no tokenizer
+    endpoint, so the size of a prompt cannot be known before sending it.
     """
 
     text: str
     done_reason: str | None
+    prompt_tokens: int = 0
+    eval_tokens: int = 0
 
 
 def build_timeout() -> httpx.Timeout:
@@ -139,6 +145,8 @@ def generate_stream(prompt: str, system: str | None = None) -> Iterator[ModelChu
                 yield ModelChunk(
                     text=str(payload.get("response") or ""),
                     done_reason=str(payload.get("done_reason") or "stop") if done else None,
+                    prompt_tokens=int(payload.get("prompt_eval_count") or 0),
+                    eval_tokens=int(payload.get("eval_count") or 0),
                 )
     except httpx.TimeoutException as problem:
         raise ModelError(

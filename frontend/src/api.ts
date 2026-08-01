@@ -24,6 +24,10 @@ export interface MetaEvent {
   document_ids: string[];
   document_type: string;
   truncated: boolean;
+  // The document was recognized as a kind this tool does not handle well.
+  // Separate from truncated: one is this document being too long, the other
+  // is the whole class of document being out of scope.
+  unsupported_type: boolean;
 }
 
 export interface TokenEvent {
@@ -37,13 +41,32 @@ export interface WarningEvent {
   unverified: string[];
 }
 
+// Sent on every finished answer, not only when something fails. Without it,
+// an answer where nothing could be checked looks exactly like one where
+// everything checked out. The counts are approximate: they come from a
+// regular expression over the answer text.
+export interface CoverageEvent {
+  event: "coverage";
+  figures: number;
+  quoted: number;
+}
+
+// The first attempt overflowed the context window, so whatever has been
+// streamed so far must be discarded and the answer generated again from a
+// shorter excerpt.
+export interface RestartEvent {
+  event: "restart";
+  reason: "context_overflow";
+  message: string;
+}
+
 export interface DoneEvent {
   event: "done";
 }
 
 export interface IncompleteEvent {
   event: "incomplete";
-  reason: "length" | "interrupted";
+  reason: "length" | "interrupted" | "context_overflow";
   detail: string;
 }
 
@@ -57,6 +80,8 @@ export type StreamEvent =
   | MetaEvent
   | TokenEvent
   | WarningEvent
+  | CoverageEvent
+  | RestartEvent
   | DoneEvent
   | IncompleteEvent
   | ErrorEvent;

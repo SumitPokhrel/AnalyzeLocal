@@ -11,12 +11,26 @@ interface Exchange {
   question: string;
   answer: string;
   unverified: string[];
+  figures: number;
+  quoted: number;
+  checked: boolean;
+  restarted: boolean;
   incomplete: string;
   error: string;
 }
 
 function blankExchange(question: string): Exchange {
-  return { question, answer: "", unverified: [], incomplete: "", error: "" };
+  return {
+    question,
+    answer: "",
+    unverified: [],
+    figures: 0,
+    quoted: 0,
+    checked: false,
+    restarted: false,
+    incomplete: "",
+    error: "",
+  };
 }
 
 export default function QuestionBox({ documentId }: QuestionBoxProps) {
@@ -38,6 +52,24 @@ export default function QuestionBox({ documentId }: QuestionBoxProps) {
         break;
       case "warning":
         updateLatest((item) => ({ ...item, unverified: event.unverified }));
+        break;
+      case "coverage":
+        updateLatest((item) => ({
+          ...item,
+          figures: event.figures,
+          quoted: event.quoted,
+          checked: true,
+        }));
+        break;
+      case "restart":
+        // The overflowed attempt is discarded, not appended to.
+        updateLatest((item) => ({
+          ...item,
+          answer: "",
+          unverified: [],
+          checked: false,
+          restarted: true,
+        }));
         break;
       case "incomplete":
         updateLatest((item) => ({ ...item, incomplete: event.detail }));
@@ -77,6 +109,22 @@ export default function QuestionBox({ documentId }: QuestionBoxProps) {
         <div key={index}>
           <p className="asked">{exchange.question}</p>
           <p className="output">{exchange.answer}</p>
+          {exchange.restarted && (
+            <p className="banner">
+              The first attempt overflowed the context window and was
+              discarded. This is a second attempt from a shorter excerpt.
+            </p>
+          )}
+          {exchange.checked && (
+            <p className={exchange.quoted === 0 ? "banner severe" : "status"}>
+              {exchange.quoted === 0
+                ? "No figure in this answer was backed by a quote, so nothing " +
+                  "here could be checked against your document."
+                : `About ${exchange.quoted} of ${exchange.figures} figures were ` +
+                  "backed by a quote from your document."}{" "}
+              Figure counting is approximate.
+            </p>
+          )}
           {exchange.incomplete && <p className="banner severe">{exchange.incomplete}</p>}
           {exchange.error && <p className="error">{exchange.error}</p>}
           {exchange.unverified.length > 0 && (
