@@ -1,11 +1,11 @@
 # SCAFFOLD.md - AnalyzeLocal
 
-Build plan for the repo. Use this together with CLAUDE.md. The pipeline is two
+Build plan for the repo. Use this together with README.md. The pipeline is two
 steps, extract then analyze. Redaction was considered and deliberately cut, for
-the reasons recorded in CLAUDE.md.
+the reasons recorded in README.md.
 
 Scope is job offers, leases, and other short documents that are mostly prose.
-Tax returns are recognized but out of scope, also recorded in CLAUDE.md.
+Tax returns are recognized but out of scope, also recorded in README.md.
 
 ## Target structure
 
@@ -146,7 +146,7 @@ FastAPI and the browser.
   There is no code generation between them, so both sides change together.
 - No emojis, decorative symbols, or em dashes anywhere in code or docs.
 - Leave clear TODO markers in anything left as a stub.
-- Do not reintroduce a redaction stage into the core pipeline. See CLAUDE.md
+- Do not reintroduce a redaction stage into the core pipeline. See README.md
   for why it was cut and the one form in which it could come back.
 
 ## Build order

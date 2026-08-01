@@ -149,9 +149,6 @@ pip install -r backend/requirements-dev.txt
 pytest
 ```
 
-The test dependencies are separate from backend/requirements.txt, so running
-the app does not install test tooling. They go into the same environment.
-
 The test documents are generated while the tests run, so there are no binary
 fixtures in the repository. Ollama does not need to be running.
 
@@ -174,19 +171,23 @@ Some options that fit a 16GB Mac:
 - gemma3:4b, Google Gemma license
 - llama3.1:8b, Meta Llama license
 
-Ollama uses Q4_K_M quantization by default, which is the right balance on a
-16GB machine.
+Qwen3 8B is the default for its permissive license and its quality at a size
+that leaves headroom on a 16GB machine. Ollama uses Q4_K_M quantization by
+default, which is the right balance here.
 
 ## How it works
 
-The pipeline has two steps: extract the text from the document, then analyze it
-with the local model. The backend is Python and FastAPI. The interface is React
-and TypeScript, built with Vite. In a normal run, FastAPI serves both the built
-interface and the API on one local port.
+The pipeline has two steps: extract the text from the document, then analyze
+it with the local model. There is nothing in between.
 
-The request and response types in frontend/src/api.ts are written by hand to
-match the Pydantic models in backend/schemas.py. There is no code generation
-step, so if you change a schema, change both files.
+The backend is Python and FastAPI. The interface is React and TypeScript,
+built with Vite. In a normal run, FastAPI serves both the built interface and
+the API on one local port.
+
+The analyze, compare, and question routes stream newline delimited JSON, so
+text appears as the model produces it rather than after the whole run. A first
+analysis takes about 30 seconds and a comparison about 80, which is too long
+to show nothing.
 
 The backend talks to the model through the HTTP API that Ollama already
 exposes on 127.0.0.1:11434, using httpx. There is no separate client library
@@ -206,6 +207,129 @@ cd frontend && npm run dev
 There are no cloud calls, no telemetry, and no analytics. Documents, and
 everything derived from them, stay on your computer. The only network use is
 loopback between your browser and the local backend.
+
+## Contributing
+
+### Constraints that do not bend
+
+- On-device only. The shipped application makes zero network calls: no cloud
+  APIs, no telemetry, no analytics, no update pings, no crash reporting that
+  transmits data. Loopback traffic between the browser, the backend, and
+  Ollama does not count, because it never leaves the machine.
+- All models run locally. Weights are downloaded once on first use and run
+  offline afterwards. Never bundle anything that phones home.
+- Apple Silicon macOS only for now. Target M1 and newer. Do not add Windows,
+  Linux, or Intel Mac code paths yet, but structure the code so a Windows port
+  stays possible.
+- Fits in 16GB. Assume an M1 running the OS and a browser alongside. Prefer
+  small quantized models, roughly 8B parameters or fewer.
+- Python is the primary language.
+
+### Keep it simple
+
+- No abstractions, config systems, or plugin frameworks until they are
+  actually needed.
+- Few, well understood dependencies. Favor the standard library and mature
+  packages over exotic ones.
+- Runtime dependencies live in backend/requirements.txt, test tooling in
+  backend/requirements-dev.txt, so running the app does not install pytest.
+- Keep the UI minimal: an upload area, a results view, and a question box. No
+  accounts, no settings sprawl, no styling beyond clean and readable.
+
+### Coding conventions
+
+- Plain, readable Python. Short, direct docstrings. Small, testable functions.
+- Type hints are mandatory on every function, covering all parameters and the
+  return type.
+- No decorative symbols, em dashes, or emojis anywhere in code, comments, or
+  docs. Plain ASCII and hyphens.
+- TypeScript runs in strict mode. No implicit any, and the any type is not an
+  escape hatch for a type error.
+- The API types in frontend/src/api.ts mirror the Pydantic models in
+  backend/schemas.py by hand. When a schema changes on one side, change the
+  other in the same commit.
+- Component props get a named interface rather than an inline type.
+- npm run build type checks before it bundles, so a type error fails the build.
+
+### Test conventions
+
+- pytest, run from the project root with a bare pytest command.
+- Test documents are generated in backend/tests/conftest.py rather than
+  committed as binary files, so a contributor can read what is in each one and
+  add a case without needing a Word licence or a scanner.
+- When a bug is fixed, add a test that fails without the fix and say in the
+  docstring what the bug was.
+
+## Design decisions
+
+Three decisions that are easy to reverse by accident. The reasoning is
+recorded so it does not have to be rediscovered.
+
+### Why there is no redaction step
+
+An earlier plan redacted personal information between extraction and analysis.
+That was cut deliberately, for two reasons. Privacy here comes from locality,
+so redacting before handing text to a model running on the same machine
+protects against nothing. And redaction actively degrades the analysis,
+because the salary figures, employer names, dates, and addresses are the
+substance of what the user wants reasoned about.
+
+It may come back as an optional feature attached to an export or copy action,
+for someone who wants to paste a sanitized version into a cloud model for a
+second opinion. That is a real workflow and the reason the door is left open.
+It is not part of the core pipeline and should not be reintroduced as one.
+
+### Why tax returns are out of scope
+
+An earlier version listed tax returns alongside job offers and leases. That
+claim is withdrawn. A blank 1040 with its common schedules extracts to about
+54,000 characters, roughly three times what fits in the context window, so
+most of it is dropped before the model sees anything. The schedules carrying
+the interesting figures, capital gains, business income, and rental income,
+sit at the end and are the first to go.
+
+Detection stays, and must not be removed. Someone will upload a 1040 whatever
+the documentation says, and the app tells them it is unsupported rather than
+producing a confident analysis of the first 40 percent. Recognizing a document
+and quietly doing a poor job of it is the failure mode this project keeps
+designing against.
+
+Chunking would change this: splitting a long document into pieces, summarizing
+each, then reasoning over the summaries. That is not built. Until it is, tax
+returns stay out of scope.
+
+### The quote check, and how to read a failed quote
+
+The analysis has to quote the document for every figure it reports, and
+verify_quotes checks each quote back against the source. When a quote fails
+that check there are two opposite explanations, and telling them apart is the
+whole job. Getting it backwards breaks the tool in one direction or the other.
+
+A normalization gap that makes a substantively verbatim quote fail to match is
+a bug in the checker, not a finding. This has already happened three times
+from different directions: collapsed whitespace, typographic quotes, and the
+dot leaders on a form line. In each case the quote said what the document says
+and a layout difference defeated the string match. Fix the matcher. False
+warnings are expensive because they teach people to ignore warnings, and a
+warning nobody reads protects nobody.
+
+Quote stitching is the opposite case and must not be treated the same way.
+When the model joins two passages that are each verbatim but sit apart in the
+document, the combined quote is a false claim: presenting them as one
+quotation asserts that the text between them does not exist. The flag is
+correct. Loosening the matcher to let stitched quotes through would make the
+checker endorse a claim the document does not support, which is worse than the
+false positives the first half is about.
+
+The test that separates them: is the quote verbatim as one contiguous span,
+ignoring layout? A formatting difference does not change what the document
+says. Omitted text does.
+
+Status as of the last measured run: stitching is watch-only. One occurrence,
+on an offer letter, where the two halves sat 96 characters apart with an
+unrelated sentence between them. That is not enough to act on. If it becomes
+common, the fix is a prompt clause requiring quotes to be contiguous or split
+into separate quotations. The fix is never a looser match.
 
 ## License
 
